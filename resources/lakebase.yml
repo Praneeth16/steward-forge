@@ -1,0 +1,43 @@
+resources:
+  postgres_projects:
+    lakebase_project:
+      project_id: ${var.lakebase_project_id}
+      display_name: Steward Forge
+      pg_version: 17
+      enable_pg_native_login: false
+      history_retention_duration: 604800s
+      purge_on_delete: false
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: ${var.lakebase_min_cu}
+        autoscaling_limit_max_cu: ${var.lakebase_max_cu}
+        suspend_timeout_duration: 300s
+      custom_tags:
+        - key: application
+          value: steward-forge
+        - key: managed-by
+          value: databricks-asset-bundles
+
+  postgres_branches:
+    production:
+      parent: ${resources.postgres_projects.lakebase_project.name}
+      branch_id: production
+      replace_existing: true
+      no_expiry: true
+      purge_on_delete: false
+
+  postgres_endpoints:
+    primary:
+      parent: ${resources.postgres_branches.production.name}
+      endpoint_id: primary
+      endpoint_type: ENDPOINT_TYPE_READ_WRITE
+      replace_existing: true
+      autoscaling_limit_min_cu: ${var.lakebase_min_cu}
+      autoscaling_limit_max_cu: ${var.lakebase_max_cu}
+      suspend_timeout_duration: 300s
+
+  postgres_databases:
+    ledger:
+      parent: ${resources.postgres_branches.production.name}
+      database_id: steward-forge-ledger
+      postgres_database: ${var.lakebase_database}
+      role: ${resources.postgres_branches.production.name}/roles/${var.lakebase_owner_role_id}

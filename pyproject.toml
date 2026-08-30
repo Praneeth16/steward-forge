@@ -1,0 +1,30 @@
+[project]
+name = "steward-forge"
+version = "0.1.0"
+description = "Governed digital workers that turn approved briefs into verifiable data products."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "databricks-sdk>=0.81.0",
+  "pydantic>=2.11.0",
+  "pyyaml>=6.0.2",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-cov>=6.2.0",
+  "ruff>=0.12.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

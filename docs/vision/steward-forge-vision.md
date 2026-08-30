@@ -20,7 +20,7 @@ Lakebase stores live operational state and coordination. Unity Catalog stores go
 
 ## Portability
 
-An installation supplies workspace authentication and bundle variables. The bundle creates dedicated resources. Worker contracts use portable schemas, generated data is synthetic, and released tables expose a documented interoperability path. Environment-specific preview features are optional and have explicit fallbacks.
+An installation supplies workspace authentication, a writable Unity Catalog catalog, and bundle variables. The bundle creates a dedicated Lakebase project, database, and catalog schemas. Worker contracts use portable schemas, generated data is synthetic, and released tables expose a documented interoperability path. Environment-specific preview features are optional and have explicit fallbacks.
 
 ## Success
 

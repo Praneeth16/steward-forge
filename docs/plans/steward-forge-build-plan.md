@@ -11,7 +11,7 @@ status: active
 
 Build four governed digital workers that turn an approved engineering brief into a tested sandbox data product with human approvals, deterministic gates, recovery controls, cost visibility, and a verifiable evidence receipt.
 
-The repository must deploy through one Databricks Asset Bundle. A fresh deployment creates its own Autoscaling Lakebase project, logical database, Unity Catalog catalog, applications, experiments, jobs, and dashboards. Existing application resources are never adopted by default.
+The repository must deploy through one Databricks Asset Bundle. A fresh deployment creates its own Autoscaling Lakebase project and logical database, plus dedicated schemas in a caller-supplied writable Unity Catalog catalog. Catalog storage is an account-level prerequisite because it cannot be provisioned portably through the Catalog API in every workspace. Existing application schemas and Lakebase resources are never adopted.
 
 ## Actors
 
@@ -37,7 +37,7 @@ The repository must deploy through one Databricks Asset Bundle. A fresh deployme
 - R9: A fail-closed pre-act check protects every mutation while evidence writes remain exempt.
 - R10: Approval identity comes from validated user claims with separation of duties and row visibility.
 - R11: Worker runs are traced to access-controlled MLflow experiments.
-- R12: Each installation owns one sandbox catalog and one Autoscaling Lakebase project.
+- R12: Each installation owns dedicated catalog schemas and one Autoscaling Lakebase project.
 - R13: One bundle deploys the system using overridable environment variables.
 - R14: Preview dependencies have tested fallbacks that preserve the IDE-like experience.
 - R15: Demonstration data is deterministic, synthetic, classified, and retention-aware.
@@ -57,10 +57,11 @@ The bundle variables include
 
 - `lakebase_project_id`, default `steward-forge-lakebase`
 - `lakebase_database`, default `steward_forge`
-- `catalog_name`, default `steward_forge`
+- `lakebase_owner_role_id`, required ID of the OAuth role auto-created for the deployer
+- `catalog_name`, required writable-catalog input
 - model endpoints, artifact repository, deployment root, and optional feature flags
 
-The bundle owns the production database branch and endpoint. Evaluation and demo branches are short-lived operational resources created outside bundle ownership so a normal deploy cannot overwrite frozen evidence.
+The bundle owns the production database branch, endpoint, database, and the Steward Forge schemas inside the configured catalog. Evaluation and demo branches are short-lived operational resources created outside bundle ownership so a normal deploy cannot overwrite frozen evidence.
 
 ### Deterministic orchestration
 

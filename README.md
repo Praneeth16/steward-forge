@@ -17,6 +17,18 @@ The project is under active construction. The issue tracker is the execution que
 
 ## Planned deployment
 
-The bundle will create a dedicated Autoscaling Lakebase project, database, Unity Catalog catalog, applications, experiments, jobs, and dashboards. It will not adopt existing application resources. Environment-specific values belong in bundle variables or local authentication profiles, never in committed source.
+The bundle will create a dedicated Autoscaling Lakebase project and database, dedicated schemas in a caller-supplied writable Unity Catalog catalog, applications, experiments, jobs, and dashboards. Catalog storage is an account-level prerequisite because some workspaces do not permit catalog creation through the Catalog API. Steward Forge will not adopt existing application schemas or Lakebase resources. Environment-specific values belong in bundle variables or local authentication profiles, never in committed source.
 
 See [the public build plan](docs/plans/steward-forge-build-plan.md) and [product vision](docs/vision/steward-forge-vision.md).
+
+## Deploy the foundation
+
+Prerequisites are Databricks CLI 0.285 or newer, `uv`, an authenticated serverless workspace with Lakebase Autoscaling, and an existing writable Unity Catalog catalog.
+
+```bash
+uv sync --dev
+uv run pytest
+uv run python scripts/deploy.py --profile <your-profile> --catalog <your-writable-catalog>
+```
+
+The helper derives the Lakebase owner-role ID from the authenticated user and invokes one `databricks bundle deploy`. Override `lakebase_project_id` or `lakebase_database` with normal bundle variables when the defaults already exist.

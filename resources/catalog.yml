@@ -1,0 +1,14 @@
+resources:
+  schemas:
+    sandbox:
+      catalog_name: ${var.catalog_name}
+      name: sandbox
+      comment: Synthetic per-brief data products and evaluation fixtures.
+      properties:
+        data_classification: synthetic
+    evidence:
+      catalog_name: ${var.catalog_name}
+      name: evidence
+      comment: Durable release receipts and reconciliation state.
+      properties:
+        append_only_intent: "true"
