@@ -70,7 +70,7 @@ def test_workbench_app_uses_bundle_owned_lakebase_resources() -> None:
     assert (source_root / "app.py").is_file()
     assert (source_root / "app.yaml").is_file()
     assert app["lifecycle"]["started"] is True
-    assert app["user_api_scopes"] == ["iam.current-user:read"]
+    assert "user_api_scopes" not in app
     assert app["permissions"] == [{"level": "CAN_USE", "group_name": "${var.app_user_group_name}"}]
     postgres = next(resource["postgres"] for resource in app["resources"] if "postgres" in resource)
     assert postgres == {

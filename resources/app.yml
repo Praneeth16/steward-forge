@@ -6,8 +6,6 @@ resources:
       source_code_path: ..
       lifecycle:
         started: true
-      user_api_scopes:
-        - iam.current-user:read
       permissions:
         - level: CAN_USE
           group_name: ${var.app_user_group_name}
