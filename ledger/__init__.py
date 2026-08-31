@@ -1,5 +1,5 @@
 """Lakebase-backed task ledger infrastructure."""
 
-from ledger.store import InMemoryLedger, Ledger, LedgerNotFound
+from ledger.store import InMemoryLedger, Ledger, LedgerConflict, LedgerNotFound
 
-__all__ = ["InMemoryLedger", "Ledger", "LedgerNotFound"]
+__all__ = ["InMemoryLedger", "Ledger", "LedgerConflict", "LedgerNotFound"]

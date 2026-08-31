@@ -58,3 +58,24 @@ def test_catalog_is_configurable_and_dedicated() -> None:
     assert {schema["catalog_name"] for schema in resources["schemas"].values()} == {
         "${var.catalog_name}"
     }
+
+
+def test_workbench_app_uses_bundle_owned_lakebase_resources() -> None:
+    document = yaml.safe_load((ROOT / "resources" / "app.yml").read_text())
+    app = document["resources"]["apps"]["workbench"]
+
+    assert app["name"] == "${var.app_name}"
+    assert app["source_code_path"] == "."
+    assert app["lifecycle"]["started"] is True
+    postgres = next(resource["postgres"] for resource in app["resources"] if "postgres" in resource)
+    assert postgres == {
+        "branch": "${resources.postgres_branches.production.name}",
+        "database": "${var.lakebase_database}",
+        "permission": "CAN_CONNECT_AND_CREATE",
+    }
+    assert app["config"]["env"] == [
+        {
+            "name": "ENDPOINT_NAME",
+            "value": "${resources.postgres_endpoints.primary.name}",
+        }
+    ]

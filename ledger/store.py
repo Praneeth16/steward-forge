@@ -15,6 +15,10 @@ class LedgerNotFound(KeyError):
     """A requested workflow does not exist."""
 
 
+class LedgerConflict(ValueError):
+    """An idempotency key or version is bound to different content."""
+
+
 class Ledger(Protocol):
     """Storage operations the deterministic orchestrator requires."""
 

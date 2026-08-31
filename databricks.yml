@@ -5,6 +5,9 @@ include:
   - resources/*.yml
 
 variables:
+  app_name:
+    description: Workspace-unique name for the Steward Forge workbench App.
+    default: steward-forge
   lakebase_project_id:
     description: Dedicated Autoscaling Lakebase project ID.
     default: steward-forge-lakebase
