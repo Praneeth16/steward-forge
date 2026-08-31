@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orchestrator.models import AcceptanceTest
+from release_evidence import GovernedReleaseReceipt, ReleaseEvidencePointer
 from workers.de.models import DataEngineerReceipt
 from workers.swe.models import SoftwareReleaseReceipt
 
@@ -173,6 +175,8 @@ class DeliveryRunResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_id: Literal["steward-forge.delivery-run-result"]
+    schema_version: Literal[2]
     workflow_id: str
     status: Literal[
         "scope_pending",
@@ -195,4 +199,20 @@ class DeliveryRunResult(BaseModel):
         default=None, pattern=r"^[a-f0-9]{64}$"
     )
     software_receipt: SoftwareReleaseReceipt | None = None
+    governed_release_receipt: GovernedReleaseReceipt | None = None
+    release_evidence_pointer: ReleaseEvidencePointer | None = None
     evidence: tuple[DeliveryEvidence, ...]
+    evidence_chain: tuple[dict[str, Any], ...]
+    evidence_head: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_explicit_version_marker(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and (
+            "schema_id" not in value or "schema_version" not in value
+        ):
+            raise ValueError(
+                "legacy delivery run result is unversioned; deserialize it with "
+                "the pre-Issue-9 result contract"
+            )
+        return value

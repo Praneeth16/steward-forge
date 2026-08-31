@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from broker.contracts import DraftArtifact, MutationReceipt
+from evidence import freeze_json, thaw_json
 
 
 class SoftwareEngineerTask(BaseModel):
@@ -117,8 +119,29 @@ class DeploymentResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     commit_sha: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observed_at: datetime
+    receipt_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{24}$")
+    request_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    lease_owner: str | None = Field(default=None, min_length=1)
+    lease_epoch: int | None = Field(default=None, gt=0)
     workspace_ids: dict[str, str]
     rollback_state: dict[str, object]
+
+    @model_validator(mode="after")
+    def receipt_binding_is_complete(self) -> DeploymentResult:
+        if (self.receipt_id is None) != (self.request_hash is None):
+            raise ValueError("deployment receipt ID and request hash must be supplied together")
+        if (self.lease_owner is None) != (self.lease_epoch is None):
+            raise ValueError("deployment lease owner and epoch must be supplied together")
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("deployment observation time must include a timezone")
+        object.__setattr__(self, "workspace_ids", freeze_json(self.workspace_ids))
+        object.__setattr__(self, "rollback_state", freeze_json(self.rollback_state))
+        return self
+
+    @field_serializer("workspace_ids", "rollback_state")
+    def serialize_deployment_mapping(self, value: object) -> object:
+        return thaw_json(value)
 
 
 class SoftwareReleaseReceipt(BaseModel):
@@ -137,3 +160,13 @@ class SoftwareReleaseReceipt(BaseModel):
     gate_results: dict[str, str]
     workspace_ids: dict[str, str]
     rollback_state: dict[str, object]
+
+    @model_validator(mode="after")
+    def freeze_release_output(self) -> SoftwareReleaseReceipt:
+        for field_name in ("gate_results", "workspace_ids", "rollback_state"):
+            object.__setattr__(self, field_name, freeze_json(getattr(self, field_name)))
+        return self
+
+    @field_serializer("gate_results", "workspace_ids", "rollback_state")
+    def serialize_release_mapping(self, value: object) -> object:
+        return thaw_json(value)

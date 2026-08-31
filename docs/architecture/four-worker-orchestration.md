@@ -54,12 +54,14 @@ approval, plan creation, read-only preparation, every attempt, escalation,
 checkpoint, each governed receipt, and the terminal run state. Data evidence
 includes the existing Data Engineer receipt. Software evidence includes the
 existing broker receipt, isolated gate results, approval-bound commit SHA,
-deployment result, and rollback state.
+deployment result, rollback state, governed receipt, cross-store pointer, canonical
+hash chain, and separately protected head.
 
-The first exact release decision atomically moves the workflow from
-`release_pending` to `release_in_progress`. Only an identical replay may resume
-that decision; a conflicting approval or rejection is refused. Final completion
-compares the stored decision binding before it can commit.
+The first exact release decision, transition to `release_in_progress`, and durable
+release intent commit atomically. Only an identical replay may resume that decision;
+a conflicting approval or rejection is refused. Deployment observes remote truth
+before mutation. Final completion reconciles the insert-only receipt and pointer,
+then compares the stored decision binding before it can commit.
 
 ## Verification boundary
 
@@ -70,10 +72,15 @@ mutations.
 
 This local reference does not prove a live Unity Catalog write, GitHub mutation,
 Databricks dashboard or Genie deployment, workspace resource ID, or rollback.
-Broker receipt caches are process-local, so a crash between an external write and
-its committed transition still requires the outbox and reconciliation work in the
-next evidence slice. The local catalog adapter makes repeated identical writes
-idempotent, but that is not cross-system crash proof. Those claims require
-deployment evidence from the target workspace and remote systems. Later delivery
-slices add durable release evidence, model limits, adversarial proof gates, and
-complete live deployment evidence.
+Broker receipt caches remain process-local, but software release recovery no longer
+depends on them. A ledger outbox plus a shared fake remote backend proves that a new
+coordinator, release service, and deployment adapter can observe the completed
+deployment and reconcile the final receipt without repeating the mutation. The local
+catalog adapter makes repeated identical data writes idempotent, but that is not
+cross-system crash proof for a live catalog.
+
+The protected PostgreSQL head, local receipt and pointer adapters, and crash tests are
+implementation evidence, not target-workspace evidence. Live Delta publication,
+Lakebase pointer persistence, dashboard deployment, model limits, adversarial gates,
+and the complete deployment evidence pack still require later slices and target
+verification.

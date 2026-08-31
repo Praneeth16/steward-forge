@@ -11,6 +11,14 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from data.generators import build_namespace, build_target_relations
+from evidence import (
+    EvidenceRecord,
+    ProtectedHead,
+    TrustedEvidenceSource,
+    canonical_json_bytes,
+    thaw_json,
+)
+from evidence import append as append_chain_record
 from gates.swe.release import SoftwareReleaseService
 from identity import AccessDenied, ActorContext, AuthorizationPolicy
 from ledger import InMemoryLedger, Ledger
@@ -36,13 +44,24 @@ from recovery import (
     RecoveryController,
     WorkerLease,
 )
-from workers.de.models import DataEngineerTask
+from release_evidence import (
+    GovernedReleaseReceipt,
+    InMemoryReleaseEvidencePointerStore,
+    InMemoryReleaseEvidenceStore,
+    PublishedReleaseEvidence,
+    ReleaseEvidencePointer,
+    ReleaseEvidencePublisher,
+    ReleaseIntent,
+)
+from workers.de.models import DataEngineerReceipt, DataEngineerTask
 from workers.pm import ProductManagerWorker
 from workers.sm import ScrumMasterWorker
+from workers.swe.deployment import DeploymentAcknowledgementLost
 from workers.swe.models import (
     PreparedSoftwareRelease,
     SoftwareEngineerTask,
     SoftwareReleaseApproval,
+    SoftwareReleaseReceipt,
 )
 
 T = TypeVar("T")
@@ -98,6 +117,8 @@ class DeliveryCoordinator:
     """Own approvals, retries, budgets, transitions, and ordered evidence."""
 
     LEASE_SECONDS = 300
+    STATE_SCHEMA_ID = "steward-forge.delivery-state"
+    STATE_SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -109,6 +130,7 @@ class DeliveryCoordinator:
         scrum_master: ScrumMasterWorker | None = None,
         lanes: ExecutionLanes | None = None,
         recovery: RecoveryController | None = None,
+        release_evidence_publisher: ReleaseEvidencePublisher | None = None,
         coordinator_id: str | None = None,
     ) -> None:
         self.ledger = ledger or InMemoryLedger()
@@ -123,6 +145,10 @@ class DeliveryCoordinator:
         self._phase_lock_guard = Lock()
         self._phase_locks: WeakValueDictionary[str, RLock] = WeakValueDictionary()
         self._policy = AuthorizationPolicy()
+        self._release_evidence = release_evidence_publisher or ReleaseEvidencePublisher(
+            InMemoryReleaseEvidenceStore(),
+            InMemoryReleaseEvidencePointerStore(),
+        )
         self._recovery = recovery or RecoveryController(
             self.ledger,
             layers={
@@ -190,9 +216,27 @@ class DeliveryCoordinator:
         submitted_evidence = DeliveryEvidence(
             sequence=1,
             event_type="brief.submitted",
-            details={"submitter": actor.subject, "run_id": config.run_id},
+            details={
+                "submitter": actor.subject,
+                "run_id": config.run_id,
+                "brief_sha256": self._canonical_sha256(
+                    submission.model_dump(mode="json")
+                ),
+                "config_sha256": self._canonical_sha256(
+                    config.model_dump(mode="json")
+                ),
+            },
+        )
+        submitted_record, submitted_head = append_chain_record(
+            None,
+            workflow_id=brief_id,
+            record_type=submitted_evidence.event_type,
+            payload=submitted_evidence.model_dump(mode="json"),
+            trusted_source="orchestrator",
         )
         initial_state: dict[str, Any] = {
+            "schema_id": self.STATE_SCHEMA_ID,
+            "schema_version": self.STATE_SCHEMA_VERSION,
             "id": brief_id,
             "status": "submitting",
             "submitted_by": actor.subject,
@@ -204,9 +248,16 @@ class DeliveryCoordinator:
             "data_receipt": None,
             "prepared_release": None,
             "software_receipt": None,
+            "governed_release_receipt": None,
+            "release_evidence_pointer": None,
+            "release_intent": None,
+            "release_evidence_chain_reference": None,
+            "release_outcome_pending": False,
+            "scope_decision_id": None,
             "decisions": {},
             "release_decision": None,
-            "delivery_evidence": [submitted_evidence.model_dump(mode="json")],
+            "evidence_chain": [submitted_record.to_dict()],
+            "evidence_head": submitted_head.to_dict(),
             "events": [],
         }
         self.ledger.create(
@@ -219,7 +270,7 @@ class DeliveryCoordinator:
         brief_id: str,
         submission: BriefSubmission,
     ) -> DeliveryRunResult:
-        state = self.ledger.get(brief_id)
+        state = self._load_state(brief_id)
         resumable_statuses = {"submitting", "scope_pending"}
         if state["status"] not in resumable_statuses or state["scope"] is not None:
             return self._render(brief_id)
@@ -260,6 +311,9 @@ class DeliveryCoordinator:
                         "contract_id": self._product_manager.contract_id,
                         "contract_version": self._product_manager.contract_version,
                         "scope_version": scope.scope_version,
+                        "scope_sha256": self._canonical_sha256(
+                            scope.model_dump(mode="json")
+                        ),
                     },
                 )
         return self._render(brief_id)
@@ -282,6 +336,7 @@ class DeliveryCoordinator:
         actor: ActorContext,
     ) -> DeliveryRunResult:
 
+        self._load_state(brief_id)
         try:
             with self.ledger.transaction(brief_id) as state:
                 scope = ProductScope.model_validate(state["scope"])
@@ -311,22 +366,31 @@ class DeliveryCoordinator:
                         self._append_evidence(
                             state,
                             "scope.rejected",
+                            trusted_source="approval-gateway",
                             details={
                                 "actor": actor.subject,
                                 "decision_id": decision.decision_id,
                                 "scope_version": decision.scope_version,
+                                "scope_sha256": self._canonical_sha256(
+                                    scope.model_dump(mode="json")
+                                ),
                             },
                         )
                         self._append_evidence(state, "run.scope-rejected")
                     else:
                         state["status"] = "scope_approved"
+                        state["scope_decision_id"] = decision.decision_id
                         self._append_evidence(
                             state,
                             "scope.approved",
+                            trusted_source="approval-gateway",
                             details={
                                 "actor": actor.subject,
                                 "decision_id": decision.decision_id,
                                 "scope_version": decision.scope_version,
+                                "scope_sha256": self._canonical_sha256(
+                                    scope.model_dump(mode="json")
+                                ),
                             },
                         )
                 current_status = state["status"]
@@ -336,7 +400,7 @@ class DeliveryCoordinator:
 
         if current_status != "scope_approved":
             return self._render(brief_id)
-        state = self.ledger.get(brief_id)
+        state = self._load_state(brief_id)
         submission = BriefSubmission.model_validate(state["brief"])
         approved_scope_payload = state["scope"]
         scope = ProductScope.model_validate(approved_scope_payload)
@@ -385,6 +449,9 @@ class DeliveryCoordinator:
                         "contract_id": self._scrum_master.contract_id,
                         "contract_version": self._scrum_master.contract_version,
                         "task_count": len(plan.tasks),
+                        "plan_sha256": self._canonical_sha256(
+                            plan.model_dump(mode="json")
+                        ),
                     },
                 )
         return self._render(brief_id)
@@ -397,7 +464,7 @@ class DeliveryCoordinator:
 
     def _advance(self, brief_id: str) -> DeliveryRunResult:
 
-        state = self.ledger.get(brief_id)
+        state = self._load_state(brief_id)
         if state["status"] in self._terminal_statuses() | {
             "release_pending",
             "release_in_progress",
@@ -471,9 +538,15 @@ class DeliveryCoordinator:
                 self._append_evidence(
                     delivery_state,
                     "data.release.completed",
+                    trusted_source="capability-broker",
                     worker_id="data-engineer",
                     task_id=plan.tasks[0].task_id,
-                    details={"receipt_id": result.receipt.receipt_id},
+                    details={
+                        "receipt_id": result.receipt.receipt_id,
+                        "receipt_sha256": self._canonical_sha256(
+                            result.receipt.model_dump(mode="json")
+                        ),
+                    },
                 )
 
             data_execution, data_result = self._run_task(
@@ -501,7 +574,7 @@ class DeliveryCoordinator:
     ) -> DeliveryRunResult:
         """Commit and gate the candidate under a lease, then await a human."""
 
-        current = self.ledger.get(brief_id)
+        current = self._load_state(brief_id)
         if current["status"] in {"release_pending", "release_in_progress"}:
             return self._render(brief_id)
         if current["status"] != "data_completed":
@@ -533,11 +606,15 @@ class DeliveryCoordinator:
             self._append_evidence(
                 state,
                 "software.release.prepared",
+                trusted_source="capability-broker",
                 worker_id="software-engineer",
                 task_id=task.task_id,
                 details={
                     "commit_sha": prepared.commit.commit_sha,
                     "broker_receipt_id": prepared.broker_receipt.receipt_id,
+                    "prepared_sha256": self._canonical_sha256(
+                        prepared.model_dump(mode="json")
+                    ),
                 },
             )
 
@@ -572,6 +649,7 @@ class DeliveryCoordinator:
         actor: ActorContext,
     ) -> DeliveryRunResult:
 
+        self._load_state(brief_id)
         payload = decision.model_dump(mode="json") | {"actor": actor.subject}
         try:
             with self.ledger.transaction(brief_id) as state:
@@ -583,10 +661,12 @@ class DeliveryCoordinator:
                             "release is already bound to a different exact decision"
                         )
                     terminal_replay = True
+                    terminal_status = str(state["status"])
                     rejected = state["status"] == "release_rejected"
                     prepared = None
                 else:
                     terminal_replay = False
+                    terminal_status = None
                     if state["status"] not in {
                         "release_pending",
                         "release_in_progress",
@@ -620,6 +700,7 @@ class DeliveryCoordinator:
                         self._append_evidence(
                             state,
                             "release.decision.recorded",
+                            trusted_source="approval-gateway",
                             worker_id="software-engineer",
                             task_id=prepared.task.task_id,
                             details={
@@ -646,6 +727,7 @@ class DeliveryCoordinator:
                         self._append_evidence(
                             state,
                             "release.rejected",
+                            trusted_source="approval-gateway",
                             worker_id="software-engineer",
                             task_id=prepared.task.task_id,
                             details={
@@ -657,14 +739,57 @@ class DeliveryCoordinator:
                         self._append_evidence(state, "run.release-rejected")
                     else:
                         state["status"] = "release_in_progress"
+                        if bound_decision is None:
+                            intent = self._build_release_intent(
+                                state,
+                                prepared,
+                                release_decision=decision,
+                            )
+                            state["release_intent"] = intent.model_dump(mode="json")
+                            self._append_evidence(
+                                state,
+                                "release.intent.recorded",
+                                trusted_source="release-gateway",
+                                worker_id="software-engineer",
+                                task_id=prepared.task.task_id,
+                                details={
+                                    "receipt_id": intent.receipt_id,
+                                    "request_hash": intent.request_hash,
+                                },
+                            )
+                            state["release_evidence_chain_reference"] = (
+                                self._chain_reference(state)
+                            )
+                        elif (
+                            state.get("release_intent") is None
+                            or state.get("release_evidence_chain_reference") is None
+                        ):
+                            raise DeliveryError(
+                                "release-in-progress state has no durable release intent"
+                            )
         except (AccessDenied, DeliveryError) as error:
             self._record_security_denial(brief_id, actor, "release", error)
             raise
 
-        if terminal_replay or rejected:
+        if terminal_replay:
+            if terminal_status == "completed":
+                return self._reconcile_completed_release(
+                    brief_id,
+                    release_decision=decision,
+                )
+            return self._render(brief_id)
+        if rejected:
             return self._render(brief_id)
         if prepared is None:
             raise DeliveryError("release decision lost its prepared candidate")
+        release_state = self._load_state(brief_id)
+        release_intent, evidence_chain_reference = self._validated_release_binding(
+            release_state,
+            prepared,
+            release_decision=decision,
+        )
+        deployment_idempotency_key = release_intent.deployment_idempotency_key
+        receipt_location = self._release_receipt_location(release_intent)
         self._software_release.restore_prepared(prepared)
 
         approval = SoftwareReleaseApproval(
@@ -680,14 +805,41 @@ class DeliveryCoordinator:
                 lease.owner,
                 lease.epoch,
             ):
-                return self._software_release.release(
+                receipt = self._software_release.release_governed(
                     prepared,
                     approval,
                     actor,
-                    idempotency_key=f"{brief_id}:deploy:v1",
+                    idempotency_key=deployment_idempotency_key,
+                    release_intent=release_intent,
+                    evidence_chain_reference=evidence_chain_reference,
+                    lease_owner=lease.owner,
+                    lease_epoch=lease.epoch,
+                )
+                return self._release_evidence.reconcile(
+                    receipt,
+                    receipt_location=receipt_location,
                 )
 
-        def commit_software(receipt, delivery_state: dict[str, Any]) -> None:
+        def observe_software(lease: WorkerLease):
+            receipt = self._software_release.observe_governed(
+                prepared,
+                approval,
+                actor,
+                idempotency_key=deployment_idempotency_key,
+                release_intent=release_intent,
+                evidence_chain_reference=evidence_chain_reference,
+            )
+            if receipt is None:
+                return None
+            return self._release_evidence.reconcile(
+                receipt,
+                receipt_location=receipt_location,
+            )
+
+        def commit_software(
+            published: PublishedReleaseEvidence,
+            delivery_state: dict[str, Any],
+        ) -> None:
             if (
                 delivery_state["status"] != "release_in_progress"
                 or delivery_state.get("release_decision") != payload
@@ -695,17 +847,39 @@ class DeliveryCoordinator:
                 raise DeliveryError(
                     "release completion no longer matches its exact decision binding"
                 )
-            delivery_state["software_receipt"] = receipt.model_dump(mode="json")
+            receipt = published.receipt
+            software_receipt = SoftwareReleaseReceipt(
+                receipt_id=receipt.receipt_id,
+                task_id=receipt.task_id,
+                commit_sha=receipt.code_sha256,
+                approval_id=receipt.release_approval_id,
+                deployment_idempotency_key=receipt.deployment_idempotency_key,
+                broker_receipt_id=receipt.broker_receipt_id,
+                gate_results=receipt.gate_results,
+                workspace_ids=thaw_json(receipt.deployment.workspace_ids),
+                rollback_state=thaw_json(receipt.deployment.rollback_state),
+            )
+            delivery_state["software_receipt"] = software_receipt.model_dump(
+                mode="json"
+            )
+            delivery_state["governed_release_receipt"] = (
+                published.receipt.model_dump(mode="json")
+            )
+            delivery_state["release_evidence_pointer"] = (
+                published.pointer.model_dump(mode="json")
+            )
+            delivery_state["release_outcome_pending"] = False
             delivery_state["status"] = "completed"
             self._append_evidence(
                 delivery_state,
                 "software.release.completed",
+                trusted_source="release-gateway",
                 worker_id="software-engineer",
                 task_id=prepared.task.task_id,
                 details={
                     "receipt_id": receipt.receipt_id,
                     "approval_actor": actor.subject,
-                    "commit_sha": receipt.commit_sha,
+                    "commit_sha": receipt.code_sha256,
                 },
             )
             self._append_evidence(delivery_state, "run.completed")
@@ -713,13 +887,365 @@ class DeliveryCoordinator:
         self._run_task(
             brief_id,
             ScrumPlan.model_validate(
-                self.ledger.get(brief_id)["plan"]
+                self._load_state(brief_id)["plan"]
             ).tasks[1],
             release_software,
             on_success=commit_software,
             expected_step="awaiting_approval",
+            resume_operation=observe_software,
+            unmetered_errors=(DeploymentAcknowledgementLost,),
+            recovery_pending_key="release_outcome_pending",
         )
         return self._render(brief_id)
+
+    def _build_release_intent(
+        self,
+        state: dict[str, Any],
+        prepared: PreparedSoftwareRelease,
+        *,
+        release_decision: ReleaseDecision,
+    ) -> ReleaseIntent:
+        data_receipt_payload = state.get("data_receipt")
+        scope_decision_id = state.get("scope_decision_id")
+        if data_receipt_payload is None or not scope_decision_id:
+            raise DeliveryError("release intent requires data and scope approval evidence")
+        parsed_data_receipt = DataEngineerReceipt.model_validate(data_receipt_payload)
+        brief = BriefSubmission.model_validate(state["brief"])
+        config = ReferenceRunConfig.model_validate(state["config"])
+        scope = ProductScope.model_validate(state["scope"])
+        plan = ScrumPlan.model_validate(state["plan"])
+        self._validate_plan(plan, scope, brief.cost_ceiling_usd)
+        self._validate_protected_provenance(
+            state,
+            brief=brief,
+            config=config,
+            scope=scope,
+            plan=plan,
+            data_receipt=parsed_data_receipt,
+            prepared=prepared,
+            release_decision=release_decision,
+        )
+        release_task = next(
+            task for task in plan.tasks if task.worker_id == "software-engineer"
+        )
+        consumed, release_execution = self._validated_attempt_costs(state, plan)
+        remaining_attempts = min(
+            release_task.max_attempts - release_execution.attempt_count,
+            int(
+                (release_execution.budget_remaining_usd + 1e-9)
+                // release_task.attempt_cost_usd
+            ),
+        )
+        authorized_cost_ceiling = consumed + (
+            max(remaining_attempts, 0) * release_task.attempt_cost_usd
+        )
+        gate_report_hash = hashlib.sha256(
+            canonical_json_bytes(prepared.gates.model_dump(mode="json"))
+        ).hexdigest()
+        return ReleaseIntent(
+            brief_id=str(state["id"]),
+            workflow_id=str(state["id"]),
+            run_id=config.run_id,
+            task_id=prepared.task.task_id,
+            code_sha256=prepared.commit.commit_sha,
+            artifact_hashes=prepared.commit.artifact_hashes,
+            broker_receipt_id=prepared.broker_receipt.receipt_id,
+            data_receipt_id=parsed_data_receipt.receipt_id,
+            data_manifest_sha256=parsed_data_receipt.manifest_sha,
+            data_relations=parsed_data_receipt.catalog_relations,
+            scope_approval_id=str(scope_decision_id),
+            release_approval_id=release_decision.decision_id,
+            gate_results=prepared.gates.results,
+            gate_report_sha256=gate_report_hash,
+            cost_basis="authorized_ceiling",
+            cost_minor_units=int(round(authorized_cost_ceiling * 100)),
+            cost_currency="USD",
+            model_usage_status="not_used",
+            deployment_idempotency_key=f"{state['id']}:deploy:v1",
+        )
+
+    def _validate_protected_provenance(
+        self,
+        state: dict[str, Any],
+        *,
+        brief: BriefSubmission,
+        config: ReferenceRunConfig,
+        scope: ProductScope,
+        plan: ScrumPlan,
+        data_receipt: DataEngineerReceipt,
+        prepared: PreparedSoftwareRelease,
+        release_decision: ReleaseDecision,
+    ) -> None:
+        workflow_id = str(state["id"])
+        submitted_record, submitted = self._protected_event(
+            state, "brief.submitted", source="orchestrator"
+        )
+        if (
+            submitted_record.sequence != 1
+            or submitted.details.get("submitter") != state["submitted_by"]
+            or submitted.details.get("run_id") != config.run_id
+            or submitted.details.get("brief_sha256")
+            != self._canonical_sha256(brief.model_dump(mode="json"))
+            or submitted.details.get("config_sha256")
+            != self._canonical_sha256(config.model_dump(mode="json"))
+        ):
+            raise DeliveryError("brief or run config diverges from protected evidence")
+
+        _, scope_event = self._protected_event(
+            state, "scope.approved", source="approval-gateway"
+        )
+        if (
+            scope.brief_id != workflow_id
+            or scope_event.details.get("decision_id") != state["scope_decision_id"]
+            or scope_event.details.get("scope_version") != scope.scope_version
+            or scope_event.details.get("scope_sha256")
+            != self._canonical_sha256(scope.model_dump(mode="json"))
+        ):
+            raise DeliveryError("scope approval diverges from protected evidence")
+
+        _, plan_event = self._protected_event(
+            state, "plan.created", source="orchestrator"
+        )
+        if (
+            plan_event.details.get("plan_id") != plan.plan_id
+            or plan_event.details.get("task_count") != len(plan.tasks)
+            or plan_event.details.get("plan_sha256")
+            != self._canonical_sha256(plan.model_dump(mode="json"))
+        ):
+            raise DeliveryError("delivery plan diverges from protected evidence")
+
+        data_task, release_task = plan.tasks
+        _, data_event = self._protected_event(
+            state, "data.release.completed", source="capability-broker"
+        )
+        if (
+            data_event.worker_id != "data-engineer"
+            or data_event.task_id != data_task.task_id
+            or data_receipt.task_id != data_task.task_id
+            or data_receipt.receipt_id != self._data_receipt_id(data_receipt)
+            or data_event.details.get("receipt_id") != data_receipt.receipt_id
+            or data_event.details.get("receipt_sha256")
+            != self._canonical_sha256(data_receipt.model_dump(mode="json"))
+        ):
+            raise DeliveryError("data receipt diverges from protected evidence")
+
+        _, prepared_event = self._protected_event(
+            state, "software.release.prepared", source="capability-broker"
+        )
+        expected_branch = f"{config.artifact_branch.rstrip('/')}/{workflow_id}"
+        if (
+            prepared_event.worker_id != "software-engineer"
+            or prepared_event.task_id != release_task.task_id
+            or prepared.task.task_id != release_task.task_id
+            or prepared.task.brief_id != workflow_id
+            or prepared.task.submitted_by != state["submitted_by"]
+            or prepared.task.release_approver != brief.release_approver
+            or prepared.task.sandbox_catalog != config.sandbox_catalog
+            or prepared.task.sandbox_schema != config.sandbox_schema
+            or prepared.task.generated_prefix != config.generated_prefix
+            or prepared.task.artifact_branch != expected_branch
+            or prepared.task.trusted_base_sha != config.trusted_base_sha
+            or prepared.task.dashboard_title != config.dashboard_title
+            or prepared.task.source_tables != data_receipt.catalog_relations
+            or prepared_event.details.get("commit_sha")
+            != prepared.commit.commit_sha
+            or prepared_event.details.get("broker_receipt_id")
+            != prepared.broker_receipt.receipt_id
+            or prepared_event.details.get("prepared_sha256")
+            != self._canonical_sha256(prepared.model_dump(mode="json"))
+        ):
+            raise DeliveryError("prepared release diverges from protected evidence")
+
+        _, decision_event = self._protected_event(
+            state, "release.decision.recorded", source="approval-gateway"
+        )
+        if (
+            decision_event.worker_id != "software-engineer"
+            or decision_event.task_id != release_task.task_id
+            or decision_event.details.get("decision") != release_decision.decision
+            or decision_event.details.get("decision_id")
+            != release_decision.decision_id
+            or decision_event.details.get("commit_sha")
+            != release_decision.commit_sha
+        ):
+            raise DeliveryError("release decision diverges from protected evidence")
+
+    def _validated_attempt_costs(
+        self,
+        state: dict[str, Any],
+        plan: ScrumPlan,
+    ) -> tuple[float, TaskExecution]:
+        attempt_events: dict[tuple[str, str], list[DeliveryEvidence]] = {}
+        for persisted in state["evidence_chain"]:
+            record = EvidenceRecord.from_dict(persisted)
+            if record.record_type != "task.attempt.started":
+                continue
+            if record.source != "orchestrator":
+                raise DeliveryError("task attempt has an untrusted evidence source")
+            event = DeliveryEvidence.model_validate(thaw_json(record.payload))
+            if event.event_type != record.record_type or event.task_id is None:
+                raise DeliveryError("task attempt evidence is malformed")
+            phase = str(event.details.get("phase"))
+            attempt_events.setdefault((event.task_id, phase), []).append(event)
+
+        consumed = 0.0
+        release_execution: TaskExecution | None = None
+        for task in plan.tasks:
+            execution = TaskExecution.model_validate(
+                state["task_executions"][task.worker_id]
+            )
+            execution_events = attempt_events.get((task.task_id, "execution"), [])
+            preparation_events = attempt_events.get(
+                (task.task_id, "candidate-preparation"), []
+            )
+            event_count = len(execution_events) + len(preparation_events)
+            expected_consumed = event_count * task.attempt_cost_usd
+            if (
+                execution.task_id != task.task_id
+                or execution.worker_id != task.worker_id
+                or execution.max_attempts != task.max_attempts
+                or execution.budget_usd != task.budget_usd
+                or execution.attempt_count != len(execution_events)
+                or execution.preparation_attempt_count != len(preparation_events)
+                or abs(execution.budget_consumed_usd - expected_consumed) > 1e-9
+                or abs(
+                    execution.budget_remaining_usd
+                    - max(task.budget_usd - expected_consumed, 0)
+                )
+                > 1e-9
+            ):
+                raise DeliveryError("task accounting diverges from protected evidence")
+            for phase_events in (preparation_events, execution_events):
+                for expected_attempt, event in enumerate(phase_events, start=1):
+                    if (
+                        event.worker_id != task.worker_id
+                        or event.details.get("attempt") != expected_attempt
+                    ):
+                        raise DeliveryError("task attempt evidence is not sequential")
+            consumed += expected_consumed
+            if task.worker_id == "software-engineer":
+                release_execution = execution
+        if release_execution is None:
+            raise DeliveryError("delivery plan has no software release execution")
+        return consumed, release_execution
+
+    @staticmethod
+    def _data_receipt_id(receipt: DataEngineerReceipt) -> str:
+        payload = {
+            "task_id": receipt.task_id,
+            "manifest_sha": receipt.manifest_sha,
+            "catalog_relations": receipt.catalog_relations,
+            "mutation_receipt_ids": receipt.mutation_receipt_ids,
+            "repair_attempts": receipt.repair_attempts,
+            "gate_results": receipt.gate_results,
+        }
+        canonical = canonical_json_bytes(payload).decode("ascii")
+        return hashlib.sha256(f"receipt:{canonical}".encode("ascii")).hexdigest()[:24]
+
+    @staticmethod
+    def _canonical_sha256(value: object) -> str:
+        return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+    @staticmethod
+    def _protected_event(
+        state: dict[str, Any],
+        event_type: str,
+        *,
+        source: TrustedEvidenceSource,
+    ) -> tuple[EvidenceRecord, DeliveryEvidence]:
+        matches: list[tuple[EvidenceRecord, DeliveryEvidence]] = []
+        for persisted in state["evidence_chain"]:
+            record = EvidenceRecord.from_dict(persisted)
+            if record.record_type != event_type:
+                continue
+            event = DeliveryEvidence.model_validate(thaw_json(record.payload))
+            if record.source != source or event.event_type != event_type:
+                raise DeliveryError(f"{event_type} has an invalid protected envelope")
+            matches.append((record, event))
+        if len(matches) != 1:
+            raise DeliveryError(f"expected one protected {event_type} event")
+        return matches[0]
+
+    def _validated_release_binding(
+        self,
+        state: dict[str, Any],
+        prepared: PreparedSoftwareRelease,
+        *,
+        release_decision: ReleaseDecision,
+    ) -> tuple[ReleaseIntent, str]:
+        release_intent = ReleaseIntent.model_validate(state.get("release_intent"))
+        record, event = self._protected_event(
+            state, "release.intent.recorded", source="release-gateway"
+        )
+        expected_reference = (
+            f"{record.chain_id}:{record.sequence}:{record.current_hash}"
+        )
+        if (
+            event.worker_id != "software-engineer"
+            or event.task_id != prepared.task.task_id
+            or event.details.get("receipt_id") != release_intent.receipt_id
+            or event.details.get("request_hash") != release_intent.request_hash
+            or state.get("release_evidence_chain_reference") != expected_reference
+        ):
+            raise DeliveryError("release intent diverges from its protected event")
+        expected_intent = self._build_release_intent(
+            state,
+            prepared,
+            release_decision=release_decision,
+        )
+        if release_intent != expected_intent:
+            raise DeliveryError("release intent diverges from protected provenance")
+        return release_intent, expected_reference
+
+    def _reconcile_completed_release(
+        self,
+        brief_id: str,
+        *,
+        release_decision: ReleaseDecision,
+    ) -> DeliveryRunResult:
+        state = self._load_state(brief_id)
+        prepared = PreparedSoftwareRelease.model_validate(state["prepared_release"])
+        release_intent, evidence_reference = self._validated_release_binding(
+            state,
+            prepared,
+            release_decision=release_decision,
+        )
+        receipt = GovernedReleaseReceipt.model_validate(
+            state.get("governed_release_receipt")
+        )
+        expected_receipt = GovernedReleaseReceipt.from_intent(
+            release_intent,
+            receipt.deployment,
+            evidence_chain_reference=evidence_reference,
+        )
+        if receipt != expected_receipt:
+            raise DeliveryError("completed receipt diverges from protected release intent")
+        expected_pointer = self._release_evidence.pointer_for(
+            receipt,
+            receipt_location=self._release_receipt_location(release_intent),
+        )
+        pointer = ReleaseEvidencePointer.model_validate(
+            state.get("release_evidence_pointer")
+        )
+        if pointer != expected_pointer:
+            raise DeliveryError("completed pointer diverges from its governed receipt")
+        self._release_evidence.reconcile(
+            receipt,
+            receipt_location=expected_pointer.receipt_location,
+        )
+        return self._render(brief_id)
+
+    @staticmethod
+    def _chain_reference(state: dict[str, Any]) -> str:
+        head = ProtectedHead.from_dict(state["evidence_head"])
+        return f"{head.chain_id}:{head.sequence}:{head.current_hash}"
+
+    @staticmethod
+    def _release_receipt_location(intent: ReleaseIntent) -> str:
+        return (
+            "delta://steward_forge_evidence.release_receipts/"
+            f"{intent.receipt_id}"
+        )
 
     def _run_task(
         self,
@@ -733,11 +1259,14 @@ class DeliveryCoordinator:
         success_stop_reason: str | None = None,
         attempt_counter: str = "attempt_count",
         phase: str = "execution",
+        resume_operation: Callable[[WorkerLease], T | None] | None = None,
+        unmetered_errors: tuple[type[Exception], ...] = (),
+        recovery_pending_key: str | None = None,
     ) -> tuple[TaskExecution, T | None]:
         if attempt_counter not in {"attempt_count", "preparation_attempt_count"}:
             raise DeliveryError("unsupported task attempt counter")
         execution = TaskExecution.model_validate(
-            self.ledger.get(brief_id)["task_executions"][task.worker_id]
+            self._load_state(brief_id)["task_executions"][task.worker_id]
         )
         try:
             lease = self._recovery.claim(
@@ -752,13 +1281,63 @@ class DeliveryCoordinator:
                     brief_id, task, execution, error
                 ), None
             current = TaskExecution.model_validate(
-                self.ledger.get(brief_id)["task_executions"][task.worker_id]
+                self._load_state(brief_id)["task_executions"][task.worker_id]
             )
             return current, None
         except Exception as error:
             return self._record_lease_claim_failure(
                 brief_id, task, execution, error
             ), None
+
+        def complete_from_observation(
+            observed_result: T,
+            observed_execution: TaskExecution,
+        ) -> tuple[TaskExecution, T]:
+            completed_execution = observed_execution.model_copy(
+                update={
+                    "state": success_state,
+                    "stop_reason": success_stop_reason or task.stop_condition,
+                }
+            )
+
+            def commit_observed(
+                state: dict[str, Any],
+                committed_result: T = observed_result,
+            ) -> None:
+                on_success(committed_result, state)
+
+            self._complete_task_transition(
+                brief_id,
+                completed_execution,
+                lease,
+                expected_step=expected_step,
+                commit_binding=self._result_binding(observed_result),
+                on_success=commit_observed,
+            )
+            return completed_execution, observed_result
+
+        def observe_bounded() -> T | None:
+            if resume_operation is None:
+                return None
+            for _ in range(task.max_attempts):
+                resumed_result = resume_operation(lease)
+                if resumed_result is not None:
+                    return resumed_result
+            return None
+
+        recovery_pending = bool(
+            recovery_pending_key
+            and self._load_state(brief_id).get(recovery_pending_key)
+        )
+        if recovery_pending:
+            resumed_result = observe_bounded()
+            if resumed_result is None:
+                return execution, None
+            return complete_from_observation(resumed_result, execution)
+        if resume_operation is not None:
+            resumed_result = resume_operation(lease)
+            if resumed_result is not None:
+                return complete_from_observation(resumed_result, execution)
         while getattr(execution, attempt_counter) < task.max_attempts:
             task_remaining = task.budget_usd - execution.budget_consumed_usd
             if task_remaining + 1e-9 < task.attempt_cost_usd:
@@ -769,7 +1348,7 @@ class DeliveryCoordinator:
                     expected_step=expected_step,
                     reason="insufficient task budget for another attempt",
                 )
-            state = self.ledger.get(brief_id)
+            state = self._load_state(brief_id)
             brief_ceiling = BriefSubmission.model_validate(
                 state["brief"]
             ).cost_ceiling_usd
@@ -812,6 +1391,38 @@ class DeliveryCoordinator:
                 result = self._lanes.mutate(lambda: operation(lease))
             except Exception as error:
                 reason = str(error) or type(error).__name__
+                if isinstance(error, unmetered_errors):
+                    execution = execution.model_copy(
+                        update={
+                            "failures": (*execution.failures, reason),
+                        }
+                    )
+                    self._recovery.write_worker_state(
+                        brief_id,
+                        task.worker_id,
+                        lease.owner,
+                        lease.epoch,
+                        execution.model_dump(mode="json"),
+                    )
+                    with self.ledger.transaction(brief_id) as state:
+                        self._store_execution(state, execution)
+                        if recovery_pending_key is not None:
+                            state[recovery_pending_key] = True
+                        self._append_evidence(
+                            state,
+                            "release.outcome.unknown",
+                            worker_id=task.worker_id,
+                            task_id=task.task_id,
+                            details={
+                                "attempt": attempt,
+                                "failure": reason,
+                                "additional_retry_charged": False,
+                            },
+                        )
+                    resumed_result = observe_bounded()
+                    if resumed_result is None:
+                        return execution, None
+                    return complete_from_observation(resumed_result, execution)
                 execution = execution.model_copy(
                     update={"failures": (*execution.failures, reason)}
                 )
@@ -1283,24 +1894,36 @@ class DeliveryCoordinator:
     def _store_execution(state: dict[str, Any], execution: TaskExecution) -> None:
         state["task_executions"][execution.worker_id] = execution.model_dump(mode="json")
 
-    @staticmethod
+    @classmethod
     def _append_evidence(
+        cls,
         state: dict[str, Any],
         event_type: str,
         *,
+        trusted_source: TrustedEvidenceSource = "orchestrator",
         worker_id: str | None = None,
         task_id: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        evidence = state["delivery_evidence"]
+        cls._require_current_state(state)
         event = DeliveryEvidence(
-            sequence=len(evidence) + 1,
+            sequence=len(state["evidence_chain"]) + 1,
             event_type=event_type,
             worker_id=worker_id,
             task_id=task_id,
             details=details or {},
         )
-        evidence.append(event.model_dump(mode="json"))
+        event_payload = event.model_dump(mode="json")
+        previous_head = ProtectedHead.from_dict(state["evidence_head"])
+        record, head = append_chain_record(
+            previous_head,
+            workflow_id=str(state["id"]),
+            record_type=event_type,
+            payload=event_payload,
+            trusted_source=trusted_source,
+        )
+        state["evidence_chain"].append(record.to_dict())
+        state["evidence_head"] = head.to_dict()
 
     def _finish(self, brief_id: str, status: str) -> DeliveryRunResult:
         if status not in {"completed", "budget_stopped", "failed"}:
@@ -1335,7 +1958,11 @@ class DeliveryCoordinator:
         }
 
     def _render(self, brief_id: str) -> DeliveryRunResult:
-        state = self.ledger.get(brief_id)
+        state = self._load_state(brief_id)
+        evidence = tuple(
+            DeliveryEvidence.model_validate(record["payload"])
+            for record in state["evidence_chain"]
+        )
         prepared = state.get("prepared_release")
         prepared_sha = None
         if prepared is not None:
@@ -1343,6 +1970,8 @@ class DeliveryCoordinator:
                 prepared
             ).commit.commit_sha
         return DeliveryRunResult(
+            schema_id="steward-forge.delivery-run-result",
+            schema_version=2,
             workflow_id=brief_id,
             status=state["status"],
             scope=state["scope"],
@@ -1351,8 +1980,48 @@ class DeliveryCoordinator:
             data_receipt=state["data_receipt"],
             prepared_release_sha=prepared_sha,
             software_receipt=state["software_receipt"],
-            evidence=tuple(state["delivery_evidence"]),
+            governed_release_receipt=state["governed_release_receipt"],
+            release_evidence_pointer=state["release_evidence_pointer"],
+            evidence=evidence,
+            evidence_chain=tuple(state["evidence_chain"]),
+            evidence_head=state["evidence_head"],
         )
+
+    def _load_state(self, brief_id: str) -> dict[str, Any]:
+        state = self.ledger.get(brief_id)
+        self._require_current_state(state)
+        return state
+
+    @classmethod
+    def _require_current_state(cls, state: Mapping[str, Any]) -> None:
+        schema_id = state.get("schema_id")
+        schema_version = state.get("schema_version")
+        if schema_id is None and schema_version is None:
+            if "delivery_evidence" in state:
+                raise DeliveryError(
+                    "legacy delivery state cannot be resumed safely: delivery_evidence "
+                    "has no trusted-source provenance; resubmit the original brief to "
+                    "create a protected version 2 workflow using a new idempotency key"
+                )
+            raise DeliveryError(
+                "unversioned delivery state cannot be resumed safely; resubmit the "
+                "original brief to create a protected version 2 workflow using a new "
+                "idempotency key"
+            )
+        if (
+            schema_id != cls.STATE_SCHEMA_ID
+            or schema_version != cls.STATE_SCHEMA_VERSION
+        ):
+            raise DeliveryError(
+                "unsupported delivery state contract "
+                f"{schema_id!r} version {schema_version!r}; expected "
+                f"{cls.STATE_SCHEMA_ID!r} version {cls.STATE_SCHEMA_VERSION}"
+            )
+        if "evidence_chain" not in state or "evidence_head" not in state:
+            raise DeliveryError(
+                "delivery state version 2 requires a protected evidence_chain and "
+                "evidence_head"
+            )
 
     def _phase_lock(self, brief_id: str) -> RLock:
         with self._phase_lock_guard:

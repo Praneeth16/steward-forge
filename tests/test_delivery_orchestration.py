@@ -543,23 +543,6 @@ class _FailSecondCatalog(InMemoryCatalogAdapter):
         return super().write(arguments)
 
 
-class _FailOnceDeployment(InMemoryDeploymentAdapter):
-    def __init__(self) -> None:
-        super().__init__(previous_release_sha="0" * 64)
-        self.attempts = 0
-
-    def deploy(self, *, commit_sha, include_genie, idempotency_key):
-        self.attempts += 1
-        result = super().deploy(
-            commit_sha=commit_sha,
-            include_genie=include_genie,
-            idempotency_key=idempotency_key,
-        )
-        if self.attempts == 1:
-            raise TimeoutError("deployment acknowledgement timed out")
-        return result
-
-
 class _BlockingRestoreSoftwareRelease(SoftwareReleaseService):
     def __init__(self, repository, deployer) -> None:
         super().__init__(repository, deployer)
@@ -720,8 +703,8 @@ class _CrashOnceOnAtomicTerminalLedger(InMemoryLedger):
                 not self.crashed
                 and state.get("status") == "failed"
                 and any(
-                    event.get("event_type") == "run.failed"
-                    for event in state.get("delivery_evidence", [])
+                    event.get("record_type") == "run.failed"
+                    for event in state.get("evidence_chain", [])
                 )
             ):
                 self.crashed = True
@@ -1069,9 +1052,12 @@ def test_data_retry_reuses_broker_receipts_after_a_partial_publish() -> None:
     assert len(catalog.write_events) == 3
 
 
-def test_software_retry_reuses_prepared_envelope_after_lost_deploy_ack() -> None:
+def test_lost_deploy_ack_reuses_prepared_envelope_without_retry_charge() -> None:
     repository = InMemoryArtifactRepository(BASE_SHA)
-    deployer = _FailOnceDeployment()
+    deployer = InMemoryDeploymentAdapter(
+        previous_release_sha="0" * 64,
+        lose_acknowledgement_once=True,
+    )
     gates = _CountingSoftwareGate()
     service = SoftwareReleaseService(repository, deployer, gates=gates)
 
@@ -1082,13 +1068,12 @@ def test_software_retry_reuses_prepared_envelope_after_lost_deploy_ack() -> None
     )
 
     assert result.status == "completed"
-    assert result.task_executions["software-engineer"].attempt_count == 2
+    assert result.task_executions["software-engineer"].attempt_count == 1
     assert repository.commit_calls == 1
     assert gates.evaluate_calls == 3
-    assert deployer.attempts == 2
     assert deployer.deploy_calls == 1
     assert any(
-        event.event_type == "task.checkpointed"
+        event.event_type == "release.outcome.unknown"
         and event.worker_id == "software-engineer"
         for event in result.evidence
     )

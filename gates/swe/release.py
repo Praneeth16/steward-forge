@@ -12,10 +12,13 @@ from broker.service import (
     mutation_receipt_id,
     mutation_request_hash,
 )
+from evidence import canonical_json_bytes, thaw_json
 from identity import AccessDenied, ActorContext, AuthorizationPolicy
+from release_evidence import DeploymentObservation, GovernedReleaseReceipt, ReleaseIntent
 from workers.swe.deployment import InMemoryDeploymentAdapter
 from workers.swe.models import (
     ArtifactCommit,
+    DeploymentResult,
     PreparedSoftwareRelease,
     SoftwareCandidate,
     SoftwareEngineerTask,
@@ -52,7 +55,9 @@ class SoftwareReleaseService:
         self._decisions: dict[
             str, tuple[str, SoftwareReleaseReceipt | None]
         ] = {}
-        self._release_results: dict[str, tuple[str, SoftwareReleaseReceipt]] = {}
+        self._release_results: dict[
+            str, tuple[str, SoftwareReleaseReceipt, DeploymentResult]
+        ] = {}
 
     def prepare(self, task: SoftwareEngineerTask) -> PreparedSoftwareRelease:
         candidate = self.draft(task)
@@ -190,11 +195,87 @@ class SoftwareReleaseService:
         idempotency_key: str,
     ) -> SoftwareReleaseReceipt:
         with self._lock:
-            return self._release(
+            receipt, _ = self._release(
                 prepared,
                 approval,
                 actor,
                 idempotency_key=idempotency_key,
+                release_intent=None,
+                deployment_lease_owner=None,
+                deployment_lease_epoch=None,
+            )
+            return receipt
+
+    def release_governed(
+        self,
+        prepared: PreparedSoftwareRelease,
+        approval: SoftwareReleaseApproval,
+        actor: ActorContext,
+        *,
+        idempotency_key: str,
+        release_intent: ReleaseIntent,
+        evidence_chain_reference: str,
+        lease_owner: str,
+        lease_epoch: int,
+    ) -> GovernedReleaseReceipt:
+        """Deploy one durable intent and return its full governed receipt."""
+
+        with self._lock:
+            self._validate_governed_intent(
+                prepared,
+                approval,
+                idempotency_key=idempotency_key,
+                release_intent=release_intent,
+            )
+            _, deployment = self._release(
+                prepared,
+                approval,
+                actor,
+                idempotency_key=idempotency_key,
+                release_intent=release_intent,
+                deployment_lease_owner=lease_owner,
+                deployment_lease_epoch=lease_epoch,
+            )
+            return self._governed_receipt(
+                release_intent,
+                deployment,
+                evidence_chain_reference=evidence_chain_reference,
+            )
+
+    def observe_governed(
+        self,
+        prepared: PreparedSoftwareRelease,
+        approval: SoftwareReleaseApproval,
+        actor: ActorContext,
+        *,
+        idempotency_key: str,
+        release_intent: ReleaseIntent,
+        evidence_chain_reference: str,
+    ) -> GovernedReleaseReceipt | None:
+        """Rebuild a receipt from matching remote truth without deploying."""
+
+        with self._lock:
+            self._validate_governed_intent(
+                prepared,
+                approval,
+                idempotency_key=idempotency_key,
+                release_intent=release_intent,
+            )
+            deployment = self._deployer.observe(
+                commit_sha=prepared.commit.commit_sha,
+                include_genie=prepared.candidate.genie_included,
+                idempotency_key=idempotency_key,
+                receipt_id=release_intent.receipt_id,
+                request_hash=release_intent.request_hash,
+            )
+            if deployment is None:
+                return None
+            self._require_release_context(prepared, actor)
+            self._verify_release_candidate(prepared, approval)
+            return self._governed_receipt(
+                release_intent,
+                deployment,
+                evidence_chain_reference=evidence_chain_reference,
             )
 
     def _release(
@@ -204,7 +285,91 @@ class SoftwareReleaseService:
         actor: ActorContext,
         *,
         idempotency_key: str,
-    ) -> SoftwareReleaseReceipt:
+        release_intent: ReleaseIntent | None,
+        deployment_lease_owner: str | None,
+        deployment_lease_epoch: int | None,
+    ) -> tuple[SoftwareReleaseReceipt, DeploymentResult]:
+        task = prepared.task
+        self._require_release_context(prepared, actor)
+        decision_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "approval": approval.model_dump(mode="json"),
+                    "actor": actor.subject,
+                    "commit_sha": prepared.commit.commit_sha,
+                    "idempotency_key": idempotency_key,
+                    "release_request_hash": (
+                        release_intent.request_hash if release_intent is not None else None
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        existing = self._decisions.get(approval.decision_id)
+        if existing is not None:
+            previous_fingerprint, receipt = existing
+            if previous_fingerprint != decision_fingerprint:
+                raise ReleaseDenied("release decision ID is bound to different content")
+            if receipt is not None:
+                return self._observed_release_result(
+                    prepared,
+                    receipt,
+                    idempotency_key=idempotency_key,
+                    release_intent=release_intent,
+                )
+        else:
+            self._decisions[approval.decision_id] = (decision_fingerprint, None)
+        previous_release = self._release_results.get(idempotency_key)
+        if previous_release is not None:
+            previous_fingerprint, receipt, deployment = previous_release
+            if previous_fingerprint != decision_fingerprint:
+                raise ReleaseDenied("release idempotency key is bound to different content")
+            return receipt, deployment
+        gate_results = self._verify_release_candidate(prepared, approval)
+        deployment = self._deployer.ensure_deployed(
+            commit_sha=prepared.commit.commit_sha,
+            include_genie=prepared.candidate.genie_included,
+            idempotency_key=idempotency_key,
+            receipt_id=(release_intent.receipt_id if release_intent is not None else None),
+            request_hash=(
+                release_intent.request_hash if release_intent is not None else None
+            ),
+            lease_owner=deployment_lease_owner,
+            lease_epoch=deployment_lease_epoch,
+        )
+        payload = {
+            "task_id": task.task_id,
+            "commit_sha": prepared.commit.commit_sha,
+            "approval_id": approval.decision_id,
+            "deployment_idempotency_key": idempotency_key,
+            "broker_receipt_id": prepared.broker_receipt.receipt_id,
+            "gate_results": gate_results,
+            "workspace_ids": thaw_json(deployment.workspace_ids),
+            "rollback_state": thaw_json(deployment.rollback_state),
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        receipt = SoftwareReleaseReceipt(
+            receipt_id=(
+                release_intent.receipt_id
+                if release_intent is not None
+                else hashlib.sha256(f"release:{canonical}".encode()).hexdigest()[:24]
+            ),
+            **payload,
+        )
+        self._decisions[approval.decision_id] = (decision_fingerprint, receipt)
+        self._release_results[idempotency_key] = (
+            decision_fingerprint,
+            receipt,
+            deployment,
+        )
+        return receipt, deployment
+
+    def _require_release_context(
+        self,
+        prepared: PreparedSoftwareRelease,
+        actor: ActorContext,
+    ) -> None:
         task = prepared.task
         try:
             self._policy.require_release(
@@ -219,33 +384,13 @@ class SoftwareReleaseService:
         stored = self._prepared.get(prepared.commit.commit_sha)
         if stored is None or stored != prepared:
             raise ReleaseDenied("prepared release envelope is not registered")
-        decision_fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "approval": approval.model_dump(mode="json"),
-                    "actor": actor.subject,
-                    "commit_sha": prepared.commit.commit_sha,
-                    "idempotency_key": idempotency_key,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
-        existing = self._decisions.get(approval.decision_id)
-        if existing is not None:
-            previous_fingerprint, receipt = existing
-            if previous_fingerprint != decision_fingerprint:
-                raise ReleaseDenied("release decision ID is bound to different content")
-            if receipt is not None:
-                return receipt
-        else:
-            self._decisions[approval.decision_id] = (decision_fingerprint, None)
-        previous_release = self._release_results.get(idempotency_key)
-        if previous_release is not None:
-            previous_fingerprint, receipt = previous_release
-            if previous_fingerprint != decision_fingerprint:
-                raise ReleaseDenied("release idempotency key is bound to different content")
-            return receipt
+
+    def _verify_release_candidate(
+        self,
+        prepared: PreparedSoftwareRelease,
+        approval: SoftwareReleaseApproval,
+    ) -> dict[str, str]:
+        task = prepared.task
         if approval.decision != "approved":
             raise ReleaseDenied("release approval was rejected")
         if approval.approved_sha != prepared.commit.commit_sha:
@@ -276,26 +421,83 @@ class SoftwareReleaseService:
             prepared.commit.commit_sha, task.trusted_base_sha
         ):
             raise ReleaseDenied("candidate is not descended from the trusted base")
-        deployment = self._deployer.deploy(
+        return gate_results
+
+    def _observed_release_result(
+        self,
+        prepared: PreparedSoftwareRelease,
+        receipt: SoftwareReleaseReceipt,
+        *,
+        idempotency_key: str,
+        release_intent: ReleaseIntent | None,
+    ) -> tuple[SoftwareReleaseReceipt, DeploymentResult]:
+        deployment = self._deployer.observe(
             commit_sha=prepared.commit.commit_sha,
             include_genie=prepared.candidate.genie_included,
             idempotency_key=idempotency_key,
+            receipt_id=(release_intent.receipt_id if release_intent is not None else None),
+            request_hash=(
+                release_intent.request_hash if release_intent is not None else None
+            ),
         )
-        payload = {
-            "task_id": task.task_id,
-            "commit_sha": prepared.commit.commit_sha,
-            "approval_id": approval.decision_id,
-            "deployment_idempotency_key": idempotency_key,
+        if deployment is None:
+            raise ReleaseDenied("release receipt has no observable remote deployment")
+        return receipt, deployment
+
+    @staticmethod
+    def _validate_governed_intent(
+        prepared: PreparedSoftwareRelease,
+        approval: SoftwareReleaseApproval,
+        *,
+        idempotency_key: str,
+        release_intent: ReleaseIntent,
+    ) -> None:
+        expected_gate_hash = hashlib.sha256(
+            canonical_json_bytes(prepared.gates.model_dump(mode="json"))
+        ).hexdigest()
+        expected = {
+            "brief_id": prepared.task.brief_id,
+            "workflow_id": prepared.task.brief_id,
+            "task_id": prepared.task.task_id,
+            "code_sha256": prepared.commit.commit_sha,
+            "artifact_hashes": prepared.commit.artifact_hashes,
             "broker_receipt_id": prepared.broker_receipt.receipt_id,
-            "gate_results": gate_results,
-            "workspace_ids": deployment.workspace_ids,
-            "rollback_state": deployment.rollback_state,
+            "release_approval_id": approval.decision_id,
+            "gate_results": prepared.gates.results,
+            "gate_report_sha256": expected_gate_hash,
+            "deployment_idempotency_key": idempotency_key,
         }
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        receipt = SoftwareReleaseReceipt(
-            receipt_id=hashlib.sha256(f"release:{canonical}".encode()).hexdigest()[:24],
-            **payload,
+        for field, value in expected.items():
+            if getattr(release_intent, field) != value:
+                raise ReleaseDenied(f"release intent does not match {field}")
+
+    @staticmethod
+    def _governed_receipt(
+        release_intent: ReleaseIntent,
+        deployment,
+        *,
+        evidence_chain_reference: str,
+    ) -> GovernedReleaseReceipt:
+        if (
+            deployment.receipt_id != release_intent.receipt_id
+            or deployment.request_hash != release_intent.request_hash
+        ):
+            raise ReleaseDenied("observed deployment does not match release intent")
+        observation = DeploymentObservation(
+            receipt_id=release_intent.receipt_id,
+            request_hash=release_intent.request_hash,
+            observed_at=deployment.observed_at,
+            lease_owner=deployment.lease_owner,
+            lease_epoch=deployment.lease_epoch,
+            status="succeeded",
+            workspace_ids=thaw_json(deployment.workspace_ids),
+            rollback_state=thaw_json(deployment.rollback_state),
+            deployment_output={
+                "deployment_idempotency_key": release_intent.deployment_idempotency_key
+            },
         )
-        self._decisions[approval.decision_id] = (decision_fingerprint, receipt)
-        self._release_results[idempotency_key] = (decision_fingerprint, receipt)
-        return receipt
+        return GovernedReleaseReceipt.from_intent(
+            release_intent,
+            observation,
+            evidence_chain_reference=evidence_chain_reference,
+        )
