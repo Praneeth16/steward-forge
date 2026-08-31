@@ -75,8 +75,8 @@ def test_databricks_verifier_normalizes_bearer_and_maps_groups(monkeypatch) -> N
             )
 
     class FakeWorkspaceClient:
-        def __init__(self, *, host: str, token: str) -> None:
-            observed.update(host=host, token=token)
+        def __init__(self, *, host: str, token: str, auth_type: str) -> None:
+            observed.update(host=host, token=token, auth_type=auth_type)
             self.current_user = FakeCurrentUser()
 
     monkeypatch.setenv("DATABRICKS_HOST", "workspace.example.invalid")
@@ -87,6 +87,7 @@ def test_databricks_verifier_normalizes_bearer_and_maps_groups(monkeypatch) -> N
 
     assert actor == ActorContext(subject="workspace-subject", roles={"approver"})
     assert observed == {
+        "auth_type": "pat",
         "host": "https://workspace.example.invalid",
         "token": "forwarded-token",
     }

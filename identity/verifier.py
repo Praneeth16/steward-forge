@@ -56,7 +56,11 @@ class DatabricksIdentityVerifier:
         if host and not host.startswith("http"):
             host = f"https://{host}"
         try:
-            user = WorkspaceClient(host=host or None, token=token).current_user.me()
+            user = WorkspaceClient(
+                host=host or None,
+                token=token,
+                auth_type="pat",
+            ).current_user.me()
         except Exception as error:
             LOGGER.warning(
                 "Forwarded user token validation failed with %s",
