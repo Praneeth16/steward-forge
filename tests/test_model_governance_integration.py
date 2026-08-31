@@ -383,7 +383,13 @@ def test_bundle_wires_overridable_worker_routes_and_a_scoped_experiment() -> Non
     experiment = governance["experiments"]["model_traces"]
     assert experiment["name"] == "${var.model_trace_experiment_name}"
     assert experiment["permissions"] == [
-        {"level": "CAN_READ", "group_name": "${var.auditor_group_name}"}
+        {"level": "CAN_READ", "group_name": "${var.auditor_group_name}"},
+        {
+            "level": "CAN_EDIT",
+            "service_principal_name": (
+                "${resources.apps.workbench.service_principal_client_id}"
+            ),
+        },
     ]
 
     app = yaml.safe_load((ROOT / "resources" / "app.yml").read_text())["resources"]["apps"][

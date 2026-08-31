@@ -5,3 +5,5 @@ resources:
       permissions:
         - level: CAN_READ
           group_name: ${var.auditor_group_name}
+        - level: CAN_EDIT
+          service_principal_name: ${resources.apps.workbench.service_principal_client_id}

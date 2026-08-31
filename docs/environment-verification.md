@@ -24,7 +24,7 @@ Observed on 31 August 2026 against the first serverless deployment target. Sensi
 
 ## Model-governance bundle update
 
-The Issue 10 bundle update adds overridable worker routes and a dedicated MLflow experiment with App and auditor access. The installed CLI schema recognizes both `resources.experiments` and the App `experiment` resource binding. Authenticated validation and deployment of this update are not verified: on 31 August 2026, the local profile refresh token was expired. The PASS results above describe the earlier foundation deployment and do not prove the new model-governance resources.
+The Issue 10 bundle update adds overridable worker routes and a dedicated MLflow experiment with App and auditor access. On 31 August 2026, authenticated bundle validation passed on the dedicated target with both default and alternate model-route variables. Validation also confirmed that the experiment permission set preserves the App service principal's edit access alongside auditor read access. Deployment and live model-governance behavior remain unverified. The PASS results above describe the earlier foundation deployment and do not prove the new experiment or provider path was deployed.
 
 ## Commands exercised
 
