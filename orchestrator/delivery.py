@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from threading import Lock, RLock
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -22,6 +23,13 @@ from evidence import append as append_chain_record
 from gates.swe.release import SoftwareReleaseService
 from identity import AccessDenied, ActorContext, AuthorizationPolicy
 from ledger import InMemoryLedger, Ledger
+from model_governance import (
+    BriefBudgetSummary,
+    GovernedModelGateway,
+    ModelTraceSummary,
+    usd_ceiling_to_minor_units,
+    usd_to_minor_units,
+)
 from orchestrator.delivery_models import (
     DeliveryEvidence,
     DeliveryRunResult,
@@ -131,6 +139,7 @@ class DeliveryCoordinator:
         lanes: ExecutionLanes | None = None,
         recovery: RecoveryController | None = None,
         release_evidence_publisher: ReleaseEvidencePublisher | None = None,
+        model_gateway: GovernedModelGateway | None = None,
         coordinator_id: str | None = None,
     ) -> None:
         self.ledger = ledger or InMemoryLedger()
@@ -149,6 +158,7 @@ class DeliveryCoordinator:
             InMemoryReleaseEvidenceStore(),
             InMemoryReleaseEvidencePointerStore(),
         )
+        self._model_gateway = model_gateway
         self._recovery = recovery or RecoveryController(
             self.ledger,
             layers={
@@ -264,6 +274,27 @@ class DeliveryCoordinator:
             submission.idempotency_key, initial_state
         )
         return self._ensure_scope_proposal(brief_id, submission)
+
+    def read_model_budget(
+        self, brief_id: str, actor: ActorContext
+    ) -> BriefBudgetSummary:
+        """Return the payload-free model budget after normal brief-row checks."""
+
+        state = self._load_state(brief_id)
+        self._policy.require_view(actor, state)
+        return self._model_budget(state)
+
+    def read_model_traces(
+        self, brief_id: str, actor: ActorContext
+    ) -> tuple[ModelTraceSummary, ...]:
+        """Return scoped trace metadata without model prompts or outputs."""
+
+        state = self._load_state(brief_id)
+        self._policy.require_view(actor, state)
+        if self._model_gateway is None:
+            return ()
+        self._register_model_budget(state)
+        return self._model_gateway.read_trace_summaries(brief_id, actor)
 
     def _ensure_scope_proposal(
         self,
@@ -937,7 +968,8 @@ class DeliveryCoordinator:
             ),
         )
         authorized_cost_ceiling = consumed + (
-            max(remaining_attempts, 0) * release_task.attempt_cost_usd
+            Decimal(max(remaining_attempts, 0))
+            * Decimal(str(release_task.attempt_cost_usd))
         )
         gate_report_hash = hashlib.sha256(
             canonical_json_bytes(prepared.gates.model_dump(mode="json"))
@@ -958,7 +990,7 @@ class DeliveryCoordinator:
             gate_results=prepared.gates.results,
             gate_report_sha256=gate_report_hash,
             cost_basis="authorized_ceiling",
-            cost_minor_units=int(round(authorized_cost_ceiling * 100)),
+            cost_minor_units=usd_ceiling_to_minor_units(authorized_cost_ceiling),
             cost_currency="USD",
             model_usage_status="not_used",
             deployment_idempotency_key=f"{state['id']}:deploy:v1",
@@ -1074,7 +1106,7 @@ class DeliveryCoordinator:
         self,
         state: dict[str, Any],
         plan: ScrumPlan,
-    ) -> tuple[float, TaskExecution]:
+    ) -> tuple[Decimal, TaskExecution]:
         attempt_events: dict[tuple[str, str], list[DeliveryEvidence]] = {}
         for persisted in state["evidence_chain"]:
             record = EvidenceRecord.from_dict(persisted)
@@ -1088,7 +1120,7 @@ class DeliveryCoordinator:
             phase = str(event.details.get("phase"))
             attempt_events.setdefault((event.task_id, phase), []).append(event)
 
-        consumed = 0.0
+        consumed = Decimal(0)
         release_execution: TaskExecution | None = None
         for task in plan.tasks:
             execution = TaskExecution.model_validate(
@@ -1122,7 +1154,7 @@ class DeliveryCoordinator:
                         or event.details.get("attempt") != expected_attempt
                     ):
                         raise DeliveryError("task attempt evidence is not sequential")
-            consumed += expected_consumed
+            consumed += Decimal(event_count) * Decimal(str(task.attempt_cost_usd))
             if task.worker_id == "software-engineer":
                 release_execution = execution
         if release_execution is None:
@@ -1982,10 +2014,49 @@ class DeliveryCoordinator:
             software_receipt=state["software_receipt"],
             governed_release_receipt=state["governed_release_receipt"],
             release_evidence_pointer=state["release_evidence_pointer"],
+            model_budget=self._model_budget(state),
             evidence=evidence,
             evidence_chain=tuple(state["evidence_chain"]),
             evidence_head=state["evidence_head"],
         )
+
+    def _model_budget(self, state: dict[str, Any]) -> BriefBudgetSummary:
+        ceiling = self._model_ceiling(state)
+        if self._model_gateway is None:
+            return BriefBudgetSummary(
+                brief_id=state["id"],
+                authorized_ceiling_minor_units=ceiling,
+                budget_committed_minor_units=0,
+                metered_actual_minor_units=0,
+                remaining_authorization_minor_units=ceiling,
+                request_count=0,
+                throttle_count=0,
+                incomplete_usage_count=0,
+                reconciliation_failure_count=0,
+                usage_status="not_used",
+            )
+        self._register_model_budget(state)
+        return self._model_gateway._budget_summary(state["id"])
+
+    def _register_model_budget(self, state: dict[str, Any]) -> None:
+        if self._model_gateway is None:
+            return
+        brief = BriefSubmission.model_validate(state["brief"])
+        config = ReferenceRunConfig.model_validate(state["config"])
+        self._model_gateway.register_brief(
+            brief_id=state["id"],
+            run_id=config.run_id,
+            owner_subject=str(state["submitted_by"]),
+            viewer_subjects=tuple(
+                dict.fromkeys((brief.release_approver, *brief.viewer_subjects))
+            ),
+            authorized_ceiling_minor_units=self._model_ceiling(state),
+        )
+
+    @staticmethod
+    def _model_ceiling(state: dict[str, Any]) -> int:
+        brief = BriefSubmission.model_validate(state["brief"])
+        return usd_to_minor_units(brief.cost_ceiling_usd)
 
     def _load_state(self, brief_id: str) -> dict[str, Any]:
         state = self.ledger.get(brief_id)

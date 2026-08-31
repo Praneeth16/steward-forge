@@ -121,7 +121,7 @@ def _layers() -> dict[str, InMemoryRevocationLayer]:
     return {name: InMemoryRevocationLayer(name) for name in RecoveryController.REQUIRED_LAYERS}
 
 
-def _submission(idempotency_key: str) -> BriefSubmission:
+def _submission(idempotency_key: str, *, cost_ceiling_usd: float = 4.0) -> BriefSubmission:
     return BriefSubmission(
         title="Delivery health reference brief",
         business_question="Show delivery health and the work that needs attention.",
@@ -132,7 +132,7 @@ def _submission(idempotency_key: str) -> BriefSubmission:
                 kind="contract",
             )
         ],
-        cost_ceiling_usd=4.0,
+        cost_ceiling_usd=cost_ceiling_usd,
         release_approver="approver-1",
         viewer_subjects=["auditor-1"],
         idempotency_key=idempotency_key,
@@ -192,9 +192,10 @@ def _advance_to_release(
     *,
     idempotency_key: str,
     run_id: str,
+    cost_ceiling_usd: float = 4.0,
 ):
     submitted = coordinator.submit(
-        _submission(idempotency_key),
+        _submission(idempotency_key, cost_ceiling_usd=cost_ceiling_usd),
         config=_config(run_id),
         actor=_submitter(),
     )
@@ -680,3 +681,30 @@ def test_retry_receipt_reports_authorized_ceiling_without_underreporting() -> No
     assert receipt.cost_basis == "authorized_ceiling"
     assert receipt.cost_minor_units >= actual_cost_minor_units
     assert backend.deploy_calls == 1
+
+
+def test_computed_authorized_ceiling_rounds_fractional_minor_units_up() -> None:
+    ledger = InMemoryLedger()
+    backend = InMemoryDeploymentBackend(previous_release_sha="0" * 64)
+    publisher, _, _ = _publisher()
+    coordinator = _coordinator(
+        ledger=ledger,
+        repository=InMemoryArtifactRepository(BASE_SHA),
+        deployer=InMemoryDeploymentAdapter(backend=backend),
+        publisher=publisher,
+    )
+    pending = _advance_to_release(
+        coordinator,
+        idempotency_key="fractional-authorized-cost-01",
+        run_id="fractional-authorized-cost",
+        cost_ceiling_usd=4.02,
+    )
+
+    completed = coordinator.decide_release(
+        pending.workflow_id,
+        _release_decision("fractional-authorized-cost", pending.prepared_release_sha),
+        _approver(),
+    )
+
+    assert completed.governed_release_receipt.cost_basis == "authorized_ceiling"
+    assert completed.governed_release_receipt.cost_minor_units == 242

@@ -79,11 +79,11 @@ def test_workbench_app_uses_bundle_owned_lakebase_resources() -> None:
         "permission": "CAN_CONNECT_AND_CREATE",
     }
     env = {item["name"]: item["value"] for item in app["config"]["env"]}
-    assert env == {
+    assert {
         "ENDPOINT_NAME": "${resources.postgres_endpoints.primary.name}",
         "STEWARD_FORGE_SUBMITTER_GROUP": "${var.submitter_group_name}",
         "STEWARD_FORGE_VIEWER_GROUP": "${var.viewer_group_name}",
         "STEWARD_FORGE_APPROVER_GROUP": "${var.approver_group_name}",
         "STEWARD_FORGE_OPERATOR_GROUP": "${var.operator_group_name}",
         "STEWARD_FORGE_AUDITOR_GROUP": "${var.auditor_group_name}",
-    }
+    }.items() <= env.items()

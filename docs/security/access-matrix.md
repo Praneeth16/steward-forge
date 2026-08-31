@@ -8,7 +8,7 @@ variables.
 | Role | Endpoints | Row visibility | Explicit denials |
 | --- | --- | --- | --- |
 | Submitter | Create brief, read own brief | Briefs whose token subject equals `submitted_by` | Approval unless separately assigned the approver role; release of their own brief is always denied; operator controls |
-| Viewer | Read brief | Briefs where the token subject is submitter, named approver, or listed viewer | Create, approve, operate, audit export |
+| Viewer | Read brief, model budget, and payload-free trace metadata | Briefs where the token subject is submitter, named approver, or listed viewer | Create, approve, operate, audit export |
 | Approver | Read brief, decide scope, decide release | Briefs where the token subject is the named approver | Release when also the submitter; decisions for another approver or version/SHA |
 | Operator | Read operational brief state, kill, restore, recover | All operational rows; evidence mutations remain denied | Submitter and approver actions unless separately assigned |
 | Auditor | Read briefs, evidence, receipts, and traces | All governed evidence rows | Workflow, approval, recovery, and release mutations |

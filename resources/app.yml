@@ -23,6 +23,50 @@ resources:
             value: ${var.operator_group_name}
           - name: STEWARD_FORGE_AUDITOR_GROUP
             value: ${var.auditor_group_name}
+          - name: STEWARD_FORGE_MODEL_CALLS_ENABLED
+            value: ${var.model_calls_enabled}
+          - name: STEWARD_FORGE_MODEL_TRACE_EXPERIMENT_ID
+            value: ${resources.experiments.model_traces.id}
+          - name: STEWARD_FORGE_MODEL_MAX_INPUT_TOKENS
+            value: ${var.model_max_input_tokens}
+          - name: STEWARD_FORGE_MODEL_MAX_OUTPUT_TOKENS
+            value: ${var.model_max_output_tokens}
+          - name: STEWARD_FORGE_MODEL_MAX_REQUESTS_PER_BRIEF
+            value: ${var.model_max_requests_per_brief}
+          - name: STEWARD_FORGE_MODEL_MAX_CONCURRENT_REQUESTS
+            value: ${var.model_max_concurrent_requests}
+          - name: STEWARD_FORGE_MODEL_MAX_THROTTLE_RETRIES
+            value: ${var.model_max_throttle_retries}
+          - name: STEWARD_FORGE_MODEL_INPUT_COST_PER_MILLION_MINOR_UNITS
+            value: ${var.model_input_cost_per_million_minor_units}
+          - name: STEWARD_FORGE_MODEL_OUTPUT_COST_PER_MILLION_MINOR_UNITS
+            value: ${var.model_output_cost_per_million_minor_units}
+          - name: STEWARD_FORGE_MODEL_REQUIRED_GUARDRAILS
+            value: ${var.model_required_guardrails}
+          - name: STEWARD_FORGE_PRODUCT_MANAGER_MODEL_SERVICE_IDENTITY
+            value: ${var.product_manager_model_service_identity}
+          - name: STEWARD_FORGE_PRODUCT_MANAGER_MODEL_ENDPOINT
+            value: ${var.product_manager_model_endpoint}
+          - name: STEWARD_FORGE_PRODUCT_MANAGER_MODEL_ID
+            value: ${var.product_manager_model_id}
+          - name: STEWARD_FORGE_SCRUM_MASTER_MODEL_SERVICE_IDENTITY
+            value: ${var.scrum_master_model_service_identity}
+          - name: STEWARD_FORGE_SCRUM_MASTER_MODEL_ENDPOINT
+            value: ${var.scrum_master_model_endpoint}
+          - name: STEWARD_FORGE_SCRUM_MASTER_MODEL_ID
+            value: ${var.scrum_master_model_id}
+          - name: STEWARD_FORGE_DATA_ENGINEER_MODEL_SERVICE_IDENTITY
+            value: ${var.data_engineer_model_service_identity}
+          - name: STEWARD_FORGE_DATA_ENGINEER_MODEL_ENDPOINT
+            value: ${var.data_engineer_model_endpoint}
+          - name: STEWARD_FORGE_DATA_ENGINEER_MODEL_ID
+            value: ${var.data_engineer_model_id}
+          - name: STEWARD_FORGE_SOFTWARE_ENGINEER_MODEL_SERVICE_IDENTITY
+            value: ${var.software_engineer_model_service_identity}
+          - name: STEWARD_FORGE_SOFTWARE_ENGINEER_MODEL_ENDPOINT
+            value: ${var.software_engineer_model_endpoint}
+          - name: STEWARD_FORGE_SOFTWARE_ENGINEER_MODEL_ID
+            value: ${var.software_engineer_model_id}
       resources:
         - name: ledger
           description: Dedicated Steward Forge operational ledger.
@@ -30,3 +74,8 @@ resources:
             branch: ${resources.postgres_branches.production.name}
             database: ${resources.postgres_databases.ledger.name}
             permission: CAN_CONNECT_AND_CREATE
+        - name: model-traces
+          description: Write-only governed model traces for this App identity.
+          experiment:
+            experiment_id: ${resources.experiments.model_traces.id}
+            permission: CAN_EDIT

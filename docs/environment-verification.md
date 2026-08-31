@@ -22,6 +22,10 @@ Observed on 31 August 2026 against the first serverless deployment target. Sensi
 | No-egress generated-code runner | NOT VERIFIED | No dedicated target compute policy or NCC path has been exercised yet. | Build the isolated test gate and record a blocked outbound request before enabling generated-code execution. |
 | Compliance security profile interaction | NOT VERIFIED | The workspace-level profile state was not proven through an authoritative API. | Verify with workspace administration before relying on Omnigent or Sandbox. |
 
+## Model-governance bundle update
+
+The Issue 10 bundle update adds overridable worker routes and a dedicated MLflow experiment with App and auditor access. The installed CLI schema recognizes both `resources.experiments` and the App `experiment` resource binding. Authenticated validation and deployment of this update are not verified: on 31 August 2026, the local profile refresh token was expired. The PASS results above describe the earlier foundation deployment and do not prove the new model-governance resources.
+
 ## Commands exercised
 
 The following public-safe forms were executed. Replace placeholders with local values.

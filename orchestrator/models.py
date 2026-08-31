@@ -3,7 +3,9 @@
 import hashlib
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from model_governance.money import usd_to_minor_units
 
 
 class AcceptanceTest(BaseModel):
@@ -30,6 +32,12 @@ class BriefSubmission(BaseModel):
     release_approver: str = Field(min_length=1)
     viewer_subjects: list[str] = Field(default_factory=list)
     idempotency_key: str = Field(min_length=1)
+
+    @field_validator("cost_ceiling_usd", mode="before")
+    @classmethod
+    def require_exact_cent_ceiling(cls, value: object) -> object:
+        usd_to_minor_units(value)
+        return value
 
 
 class ScopeDecision(BaseModel):
@@ -72,9 +80,7 @@ class CandidateArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_id: Literal["steward-forge.candidate-artifact"] = (
-        "steward-forge.candidate-artifact"
-    )
+    schema_id: Literal["steward-forge.candidate-artifact"] = "steward-forge.candidate-artifact"
     schema_version: Literal[1] = 1
     path: str
     content: str

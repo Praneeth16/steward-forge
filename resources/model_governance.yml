@@ -1,0 +1,7 @@
+resources:
+  experiments:
+    model_traces:
+      name: ${var.model_trace_experiment_name}
+      permissions:
+        - level: CAN_READ
+          group_name: ${var.auditor_group_name}

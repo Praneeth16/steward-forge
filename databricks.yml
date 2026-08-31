@@ -42,6 +42,72 @@ variables:
   lakebase_max_cu:
     description: Maximum Autoscaling Lakebase compute units.
     default: 2
+  model_calls_enabled:
+    description: Enable only when a governed provider and scoped trace adapter are installed.
+    default: "false"
+  model_trace_experiment_name:
+    description: Workspace path for the dedicated access-controlled MLflow experiment.
+    default: /Shared/steward-forge-model-traces
+  model_max_input_tokens:
+    description: Maximum input tokens accepted by any worker policy.
+    default: "4096"
+  model_max_output_tokens:
+    description: Maximum output tokens accepted by any worker policy.
+    default: "1024"
+  model_max_requests_per_brief:
+    description: Maximum governed calls per worker and brief.
+    default: "8"
+  model_max_concurrent_requests:
+    description: Maximum concurrent governed calls per logical worker.
+    default: "1"
+  model_max_throttle_retries:
+    description: Maximum provider throttle retries before deterministic stop.
+    default: "2"
+  model_input_cost_per_million_minor_units:
+    description: Input-token price in minor USD units per million tokens.
+    default: "100"
+  model_output_cost_per_million_minor_units:
+    description: Output-token price in minor USD units per million tokens.
+    default: "500"
+  model_required_guardrails:
+    description: Comma-separated guardrails that provider evidence must reconcile.
+    default: safety,sensitive-data
+  product_manager_model_service_identity:
+    description: Logical Product Manager identity recorded at the gateway boundary.
+    default: steward-forge-product-manager-model
+  product_manager_model_endpoint:
+    description: Governed Product Manager serving endpoint.
+    default: steward-forge-product-manager-model
+  product_manager_model_id:
+    description: Product Manager model identifier used for reconciliation.
+    default: steward-forge-product-manager-model
+  scrum_master_model_service_identity:
+    description: Logical Scrum Master identity recorded at the gateway boundary.
+    default: steward-forge-scrum-master-model
+  scrum_master_model_endpoint:
+    description: Governed Scrum Master serving endpoint.
+    default: steward-forge-scrum-master-model
+  scrum_master_model_id:
+    description: Scrum Master model identifier used for reconciliation.
+    default: steward-forge-scrum-master-model
+  data_engineer_model_service_identity:
+    description: Logical Data Engineer identity recorded at the gateway boundary.
+    default: steward-forge-data-engineer-model
+  data_engineer_model_endpoint:
+    description: Governed Data Engineer serving endpoint.
+    default: steward-forge-data-engineer-model
+  data_engineer_model_id:
+    description: Data Engineer model identifier used for reconciliation.
+    default: steward-forge-data-engineer-model
+  software_engineer_model_service_identity:
+    description: Logical Software Engineer identity recorded at the gateway boundary.
+    default: steward-forge-software-engineer-model
+  software_engineer_model_endpoint:
+    description: Governed Software Engineer serving endpoint.
+    default: steward-forge-software-engineer-model
+  software_engineer_model_id:
+    description: Software Engineer model identifier used for reconciliation.
+    default: steward-forge-software-engineer-model
 
 targets:
   dev:

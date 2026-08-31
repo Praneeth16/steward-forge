@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from model_governance import BriefBudgetSummary
 from orchestrator.models import AcceptanceTest
 from release_evidence import GovernedReleaseReceipt, ReleaseEvidencePointer
 from workers.de.models import DataEngineerReceipt
@@ -201,6 +202,7 @@ class DeliveryRunResult(BaseModel):
     software_receipt: SoftwareReleaseReceipt | None = None
     governed_release_receipt: GovernedReleaseReceipt | None = None
     release_evidence_pointer: ReleaseEvidencePointer | None = None
+    model_budget: BriefBudgetSummary
     evidence: tuple[DeliveryEvidence, ...]
     evidence_chain: tuple[dict[str, Any], ...]
     evidence_head: dict[str, Any] | None = None
