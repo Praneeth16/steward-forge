@@ -1,0 +1,110 @@
+version: 1
+description: >-
+  Executable expectations for deterministic synthetic GCC engineering-delivery data.
+  Exactly the three findings under expected_failures are deliberately planted.
+
+datasets:
+  backlog:
+    checks:
+      - id: backlog_rows_are_synthetic
+        kind: equals
+        column: synthetic
+        value: true
+      - id: backlog_namespace_is_scoped
+        kind: matches
+        column: namespace
+        pattern: "^gcc_delivery_[a-z0-9_]+_[a-z0-9_]+$"
+      - id: backlog_team_is_fictional
+        kind: in_set
+        column: team_id
+        values:
+          - atlas_insights
+          - bluejay_platform
+          - comet_commerce
+          - drift_mobile
+          - ember_operations
+          - fjord_developer_experience
+      - id: backlog_story_points_are_fibonacci
+        kind: in_set
+        column: story_points
+        values: [1, 2, 3, 5, 8, 13]
+
+  pipeline_runs:
+    checks:
+      - id: pipeline_rows_are_synthetic
+        kind: equals
+        column: synthetic
+        value: true
+      - id: pipeline_namespace_is_scoped
+        kind: matches
+        column: namespace
+        pattern: "^gcc_delivery_[a-z0-9_]+_[a-z0-9_]+$"
+      - id: pipeline_team_is_fictional
+        kind: in_set
+        column: team_id
+        values:
+          - atlas_insights
+          - bluejay_platform
+          - comet_commerce
+          - drift_mobile
+          - ember_operations
+          - fjord_developer_experience
+      - id: pipeline_status_is_known
+        kind: in_set
+        column: status
+        values: [succeeded, failed, cancelled]
+      - id: pipeline_records_read_are_nonnegative
+        kind: greater_than_or_equal
+        column: records_read
+        value: 0
+      - id: pipeline_output_does_not_exceed_input
+        kind: less_than_or_equal_column
+        column: records_written
+        other_column: records_read
+
+  platform_costs:
+    checks:
+      - id: cost_rows_are_synthetic
+        kind: equals
+        column: synthetic
+        value: true
+      - id: cost_namespace_is_scoped
+        kind: matches
+        column: namespace
+        pattern: "^gcc_delivery_[a-z0-9_]+_[a-z0-9_]+$"
+      - id: cost_team_is_fictional
+        kind: in_set
+        column: team_id
+        values:
+          - atlas_insights
+          - bluejay_platform
+          - comet_commerce
+          - drift_mobile
+          - ember_operations
+          - fjord_developer_experience
+      - id: cost_usage_is_nonnegative
+        kind: greater_than_or_equal
+        column: usage_quantity
+        value: 0
+      - id: cost_rate_is_nonnegative
+        kind: greater_than_or_equal
+        column: unit_rate_usd
+        value: 0
+      - id: cost_total_is_nonnegative
+        kind: greater_than_or_equal
+        column: cost_usd
+        value: 0
+
+expected_failures:
+  - dataset: backlog
+    expectation_id: backlog_story_points_are_fibonacci
+    record_id: bl-bluejay-platform-04
+    reason: Planted estimation outlier for the bounded-repair demo beat.
+  - dataset: pipeline_runs
+    expectation_id: pipeline_output_does_not_exceed_input
+    record_id: pr-ember-operations-03
+    reason: Planted impossible record-count result for the bounded-repair demo beat.
+  - dataset: platform_costs
+    expectation_id: cost_total_is_nonnegative
+    record_id: cost-fjord-developer-experience-05
+    reason: Planted negative charge for the bounded-repair demo beat.
