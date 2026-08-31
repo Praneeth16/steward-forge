@@ -6,6 +6,7 @@ import subprocess
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from ledger.postgres import PostgresLedger
 from ledger.store import LedgerConflict
+from recovery import InMemoryRevocationLayer, RecoveryController
 from workbench.app import create_app
 
 
@@ -185,5 +187,53 @@ def test_brief_to_receipt_survives_an_app_restart(postgres_url: str) -> None:
         assert state["status"] == "released"
         assert state["receipt"]["id"] == receipt_id
         assert list(state["decisions"]) == ["restart-scope-1", "restart-release-1"]
+    finally:
+        restarted.close()
+
+
+def test_recovery_lease_and_checkpoint_survive_a_postgres_restart(
+    postgres_url: str,
+) -> None:
+    now = [datetime(2026, 8, 31, 9, 0, tzinfo=UTC)]
+    layers = {
+        name: InMemoryRevocationLayer(name)
+        for name in ("gateway_access", "uc_grants", "credentials")
+    }
+    ledger = PostgresLedger.from_conninfo(postgres_url)
+    ledger.open()
+    try:
+        ledger.migrate()
+        ledger.create("recovery-submission", _state())
+        controller = RecoveryController(ledger, layers=layers, clock=lambda: now[0])
+        lease = controller.claim(
+            "brief-1", "data-engineer", "process-a", lease_seconds=5
+        )
+        controller.checkpoint(
+            "brief-1",
+            "data-engineer",
+            lease.owner,
+            lease.epoch,
+            checkpoint_id="postgres-in-flight",
+            payload={"next_action": "write"},
+        )
+    finally:
+        ledger.close()
+
+    now[0] += timedelta(seconds=6)
+    restarted = PostgresLedger.from_conninfo(postgres_url)
+    restarted.open()
+    try:
+        recovered = RecoveryController(
+            restarted, layers=layers, clock=lambda: now[0]
+        ).resume_expired(
+            "brief-1",
+            "data-engineer",
+            recovery_id="postgres-restart",
+            new_owner="process-b",
+            lease_seconds=30,
+        )
+        assert recovered.lease.epoch == lease.epoch + 1
+        assert recovered.checkpoint.checkpoint_id == "postgres-in-flight"
+        assert recovered.checkpoint.resume_count == 1
     finally:
         restarted.close()

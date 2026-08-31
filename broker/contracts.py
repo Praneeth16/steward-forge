@@ -37,6 +37,9 @@ class MutationRequest(BaseModel):
     contract_id: str = Field(min_length=1)
     contract_version: int = Field(gt=0)
     worker_id: str = Field(min_length=1)
+    workflow_id: str | None = Field(default=None, min_length=1)
+    lease_owner: str | None = Field(default=None, min_length=1)
+    lease_epoch: int | None = Field(default=None, gt=0)
     tool_id: str = Field(min_length=1)
     arguments: dict[str, Any]
     idempotency_key: str = Field(min_length=1)
@@ -100,5 +103,8 @@ class MutationReceipt(BaseModel):
     receipt_id: str
     request_hash: str
     worker_id: str
+    workflow_id: str | None = None
+    lease_owner: str | None = None
+    lease_epoch: int | None = Field(default=None, gt=0)
     tool_id: str
     result: dict[str, Any]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Literal
@@ -84,6 +85,10 @@ class CapabilityBroker:
         tools: dict[str, ToolSpec],
         pre_act: ZeroOpsPreAct,
         artifact_policy: ArtifactPolicy,
+        lease_fence: Callable[
+            [MutationRequest], AbstractContextManager[None]
+        ]
+        | None = None,
     ) -> None:
         self._contracts = {
             (contract.contract_id, contract.contract_version): contract
@@ -92,6 +97,7 @@ class CapabilityBroker:
         self._tools = tools
         self._pre_act = pre_act
         self._artifact_policy = artifact_policy
+        self._lease_fence = lease_fence
         self._receipts: dict[str, tuple[str, MutationReceipt]] = {}
         self._lock = RLock()
         self.events: list[BrokerEvent] = []
@@ -100,32 +106,44 @@ class CapabilityBroker:
         with self._lock:
             try:
                 contract, tool, parsed, request_hash = self._validate(request)
-                replay = self._receipts.get(request.idempotency_key)
-                if replay is not None:
-                    previous_hash, receipt = replay
-                    if previous_hash != request_hash:
-                        raise IdempotencyConflict(
-                            "idempotency key is bound to a different request"
-                        )
-                    self._event(request, "replayed", "first receipt returned")
-                    return receipt
-
-                if tool.category != "evidence":
-                    self._artifact_policy.validate(request.arguments)
-                self._pre_act.authorize(tool.category)
-                result = tool.executor(parsed)
-                receipt = MutationReceipt(
-                    receipt_id=hashlib.sha256(
-                        f"receipt:{request_hash}".encode()
-                    ).hexdigest()[:24],
-                    request_hash=request_hash,
-                    worker_id=contract.worker_id,
-                    tool_id=request.tool_id,
-                    result=result,
+                fence = (
+                    self._lease_fence(request)
+                    if self._lease_fence is not None
+                    else nullcontext()
                 )
-                self._receipts[request.idempotency_key] = (request_hash, receipt)
-                self._event(request, "allowed", "request executed")
-                return receipt
+                with fence:
+                    replay = self._receipts.get(request.idempotency_key)
+                    if replay is not None:
+                        previous_hash, receipt = replay
+                        if previous_hash != request_hash:
+                            raise IdempotencyConflict(
+                                "idempotency key is bound to a different request"
+                            )
+                        self._event(request, "replayed", "first receipt returned")
+                        return receipt
+
+                    if tool.category != "evidence":
+                        self._artifact_policy.validate(request.arguments)
+                    self._pre_act.authorize(tool.category)
+                    result = tool.executor(parsed)
+                    receipt = MutationReceipt(
+                        receipt_id=hashlib.sha256(
+                            f"receipt:{request_hash}".encode()
+                        ).hexdigest()[:24],
+                        request_hash=request_hash,
+                        worker_id=contract.worker_id,
+                        workflow_id=request.workflow_id,
+                        lease_owner=request.lease_owner,
+                        lease_epoch=request.lease_epoch,
+                        tool_id=request.tool_id,
+                        result=result,
+                    )
+                    self._receipts[request.idempotency_key] = (
+                        request_hash,
+                        receipt,
+                    )
+                    self._event(request, "allowed", "request executed")
+                    return receipt
             except (BrokerDenied, PreActDenied, ValidationError) as error:
                 self._event(request, "denied", str(error))
                 if isinstance(error, BrokerDenied):

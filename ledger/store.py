@@ -82,7 +82,9 @@ class InMemoryLedger:
     def transaction(self, brief_id: str) -> Iterator[WorkflowState]:
         with self._lock:
             try:
-                state = self._briefs[brief_id]
+                stored = self._briefs[brief_id]
             except KeyError as error:
                 raise LedgerNotFound(brief_id) from error
+            state = deepcopy(stored)
             yield state
+            self._briefs[brief_id] = deepcopy(state)
