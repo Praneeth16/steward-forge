@@ -10,6 +10,10 @@ class AcceptanceTest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_id: Literal["steward-forge.acceptance-test"] = (
+        "steward-forge.acceptance-test"
+    )
+    schema_version: Literal[1] = 1
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     kind: Literal["schema", "contract", "unit", "quality"]
