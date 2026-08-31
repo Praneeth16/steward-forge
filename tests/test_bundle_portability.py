@@ -70,15 +70,20 @@ def test_workbench_app_uses_bundle_owned_lakebase_resources() -> None:
     assert (source_root / "app.py").is_file()
     assert (source_root / "app.yaml").is_file()
     assert app["lifecycle"]["started"] is True
+    assert app["user_api_scopes"] == ["iam.current-user:read"]
+    assert app["permissions"] == [{"level": "CAN_USE", "group_name": "${var.app_user_group_name}"}]
     postgres = next(resource["postgres"] for resource in app["resources"] if "postgres" in resource)
     assert postgres == {
         "branch": "${resources.postgres_branches.production.name}",
         "database": "${resources.postgres_databases.ledger.name}",
         "permission": "CAN_CONNECT_AND_CREATE",
     }
-    assert app["config"]["env"] == [
-        {
-            "name": "ENDPOINT_NAME",
-            "value": "${resources.postgres_endpoints.primary.name}",
-        }
-    ]
+    env = {item["name"]: item["value"] for item in app["config"]["env"]}
+    assert env == {
+        "ENDPOINT_NAME": "${resources.postgres_endpoints.primary.name}",
+        "STEWARD_FORGE_SUBMITTER_GROUP": "${var.submitter_group_name}",
+        "STEWARD_FORGE_VIEWER_GROUP": "${var.viewer_group_name}",
+        "STEWARD_FORGE_APPROVER_GROUP": "${var.approver_group_name}",
+        "STEWARD_FORGE_OPERATOR_GROUP": "${var.operator_group_name}",
+        "STEWARD_FORGE_AUDITOR_GROUP": "${var.auditor_group_name}",
+    }

@@ -149,10 +149,11 @@ def test_brief_to_receipt_survives_an_app_restart(postgres_url: str) -> None:
                     }
                 ],
                 "cost_ceiling_usd": 5,
-                "submitted_by": "demo-submitter",
-                "release_approver": "demo-approver",
+                "release_approver": "local-approver",
+                "viewer_subjects": [],
                 "idempotency_key": "restart-brief-1",
             },
+            headers={"X-Forwarded-Access-Token": "local-submitter"},
         )
         assert submitted.status_code == 201
         brief = submitted.json()
@@ -162,8 +163,8 @@ def test_brief_to_receipt_survives_an_app_restart(postgres_url: str) -> None:
                 "decision_id": "restart-scope-1",
                 "decision": "approved",
                 "scope_version": 1,
-                "actor": "demo-approver",
             },
+            headers={"X-Forwarded-Access-Token": "local-approver"},
         ).json()
         released = client.post(
             f"/api/briefs/{brief['id']}/release-decisions",
@@ -171,8 +172,8 @@ def test_brief_to_receipt_survives_an_app_restart(postgres_url: str) -> None:
                 "decision_id": "restart-release-1",
                 "decision": "approved",
                 "commit_sha": scoped["candidate_sha"],
-                "actor": "demo-approver",
             },
+            headers={"X-Forwarded-Access-Token": "local-approver"},
         )
         assert released.status_code == 200
         receipt_id = released.json()["receipt"]["id"]

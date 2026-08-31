@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
@@ -42,18 +44,30 @@ class InMemoryLedger:
     def __init__(self) -> None:
         self._lock = RLock()
         self._brief_ids_by_key: dict[str, str] = {}
+        self._input_hashes_by_key: dict[str, str] = {}
         self._briefs: dict[str, WorkflowState] = {}
 
     def create(
         self, idempotency_key: str, initial_state: WorkflowState
     ) -> tuple[WorkflowState, bool]:
         with self._lock:
+            input_hash = hashlib.sha256(
+                json.dumps(
+                    initial_state,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode()
+            ).hexdigest()
             existing_id = self._brief_ids_by_key.get(idempotency_key)
             if existing_id:
+                if self._input_hashes_by_key[idempotency_key] != input_hash:
+                    raise LedgerConflict("idempotency key is already bound to a different payload")
                 return deepcopy(self._briefs[existing_id]), False
 
             brief_id = str(initial_state["id"])
             self._brief_ids_by_key[idempotency_key] = brief_id
+            self._input_hashes_by_key[idempotency_key] = input_hash
             self._briefs[brief_id] = deepcopy(initial_state)
             return deepcopy(initial_state), True
 

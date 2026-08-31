@@ -6,10 +6,25 @@ resources:
       source_code_path: ..
       lifecycle:
         started: true
+      user_api_scopes:
+        - iam.current-user:read
+      permissions:
+        - level: CAN_USE
+          group_name: ${var.app_user_group_name}
       config:
         env:
           - name: ENDPOINT_NAME
             value: ${resources.postgres_endpoints.primary.name}
+          - name: STEWARD_FORGE_SUBMITTER_GROUP
+            value: ${var.submitter_group_name}
+          - name: STEWARD_FORGE_VIEWER_GROUP
+            value: ${var.viewer_group_name}
+          - name: STEWARD_FORGE_APPROVER_GROUP
+            value: ${var.approver_group_name}
+          - name: STEWARD_FORGE_OPERATOR_GROUP
+            value: ${var.operator_group_name}
+          - name: STEWARD_FORGE_AUDITOR_GROUP
+            value: ${var.auditor_group_name}
       resources:
         - name: ledger
           description: Dedicated Steward Forge operational ledger.

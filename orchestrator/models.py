@@ -10,9 +10,7 @@ class AcceptanceTest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_id: Literal["steward-forge.acceptance-test"] = (
-        "steward-forge.acceptance-test"
-    )
+    schema_id: Literal["steward-forge.acceptance-test"] = "steward-forge.acceptance-test"
     schema_version: Literal[1] = 1
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
@@ -28,8 +26,8 @@ class BriefSubmission(BaseModel):
     business_question: str = Field(min_length=1)
     acceptance_tests: list[AcceptanceTest] = Field(min_length=1)
     cost_ceiling_usd: float = Field(gt=0)
-    submitted_by: str = Field(min_length=1)
     release_approver: str = Field(min_length=1)
+    viewer_subjects: list[str] = Field(default_factory=list)
     idempotency_key: str = Field(min_length=1)
 
 
@@ -41,7 +39,6 @@ class ScopeDecision(BaseModel):
     decision_id: str = Field(min_length=1)
     decision: Literal["approved", "rejected"]
     scope_version: int = Field(gt=0)
-    actor: str = Field(min_length=1)
 
 
 class ReleaseDecision(BaseModel):
@@ -52,7 +49,6 @@ class ReleaseDecision(BaseModel):
     decision_id: str = Field(min_length=1)
     decision: Literal["approved", "rejected"]
     commit_sha: str = Field(min_length=1)
-    actor: str = Field(min_length=1)
 
 
 class PlannedTask(BaseModel):

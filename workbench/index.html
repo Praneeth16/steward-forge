@@ -32,6 +32,7 @@
         <label>Title<input id="title" value="Delivery health signal" required></label>
         <label>Business question<textarea id="question" required>Which fictional teams need pipeline help?</textarea></label>
         <label>Cost ceiling (USD)<input id="budget" type="number" min="1" value="5" required></label>
+        <label>Named approver subject<input id="approver" required></label>
         <button type="submit">Submit brief</button>
       </form>
 
@@ -83,8 +84,8 @@
             kind: "schema",
           }],
           cost_ceiling_usd: Number(document.querySelector("#budget").value),
-          submitted_by: "demo-submitter",
-          release_approver: "demo-approver",
+          release_approver: document.querySelector("#approver").value,
+          viewer_subjects: [],
           idempotency_key: key,
         }));
       });
@@ -94,7 +95,6 @@
           decision_id: `scope-${crypto.randomUUID()}`,
           decision: "approved",
           scope_version: brief.scope_version,
-          actor: "demo-approver",
         }));
       });
 
@@ -103,7 +103,6 @@
           decision_id: `release-${crypto.randomUUID()}`,
           decision: "approved",
           commit_sha: brief.candidate_sha,
-          actor: "demo-approver",
         }));
       });
     </script>

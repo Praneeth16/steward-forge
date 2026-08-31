@@ -8,6 +8,24 @@ variables:
   app_name:
     description: Workspace-unique name for the Steward Forge workbench App.
     default: steward-forge
+  app_user_group_name:
+    description: Existing workspace group allowed to open the workbench.
+    default: users
+  submitter_group_name:
+    description: Existing group mapped to the submitter role.
+    default: users
+  viewer_group_name:
+    description: Existing group mapped to the viewer role.
+    default: users
+  approver_group_name:
+    description: Existing group mapped to the named approver role.
+    default: users
+  operator_group_name:
+    description: Existing group mapped to recovery operations.
+    default: account admins
+  auditor_group_name:
+    description: Existing group mapped to evidence and trace review.
+    default: account admins
   lakebase_project_id:
     description: Dedicated Autoscaling Lakebase project ID.
     default: steward-forge-lakebase
