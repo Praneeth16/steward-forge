@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from broker.contracts import (
+    ArtifactCommitArgs,
     ArtifactWriteArgs,
     MutationReceipt,
     MutationRequest,
@@ -21,6 +22,7 @@ from broker.contracts import (
     TaskRecordArgs,
     WorkerContract,
 )
+from broker.security import contains_secret
 from broker.zero_ops import HealthSnapshot, PreActDenied, ZeroOpsPreAct
 
 
@@ -60,12 +62,33 @@ class ArtifactPolicy:
         "export credential",
         "reveal secret",
     )
+    denied_path_parts = frozenset(
+        {".github", "infrastructure", "platform", "secret", "secrets", "resources"}
+    )
+    denied_file_names = frozenset(
+        {".env", "app.yaml", "app.yml", "databricks.yml", "terraform.tf"}
+    )
 
     def validate(self, value: object) -> None:
         for text in self._strings(value):
             normalized = text.casefold()
             if any(fragment in normalized for fragment in self.denied_fragments):
                 raise BrokerDenied("harmful content was rejected by deterministic policy")
+            if contains_secret(text):
+                raise BrokerDenied("secret-like content was rejected by deterministic policy")
+
+    def validate_artifact_path(self, path: str) -> None:
+        parts = path.split("/")
+        normalized_parts = {part.casefold() for part in parts}
+        normalized_stems = {part.casefold().rsplit(".", maxsplit=1)[0] for part in parts}
+        if (
+            path.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+            or normalized_parts & self.denied_path_parts
+            or normalized_stems & self.denied_path_parts
+            or parts[-1].casefold() in self.denied_file_names
+        ):
+            raise BrokerDenied("privileged or unsafe artifact path was rejected")
 
     def _strings(self, value: object) -> list[str]:
         if isinstance(value, str):
@@ -175,6 +198,14 @@ class CapabilityBroker:
             self._require_artifact_scope(contract, parsed.task.expected_output)
         if isinstance(parsed, ArtifactWriteArgs):
             self._require_artifact_scope(contract, parsed.artifact.path)
+        if isinstance(parsed, ArtifactCommitArgs):
+            if parsed.branch != contract.artifact_branch:
+                raise BrokerDenied("candidate branch is outside the worker contract")
+            for artifact in parsed.artifacts:
+                self._require_artifact_scope(contract, artifact.path)
+                if artifact.path.rstrip("/") in contract.allowed_artifact_prefixes:
+                    raise BrokerDenied("artifact path must name a file below the generated prefix")
+                self._artifact_policy.validate_artifact_path(artifact.path)
         request_hash = hashlib.sha256(
             json.dumps(
                 request.model_dump(mode="json"),
@@ -279,6 +310,38 @@ def create_data_engineer_broker(
                 # Row text is governed data, not an executable instruction channel.
                 # Its exact canary placement is checked by the deterministic data gate.
                 scan_artifact_content=False,
+            )
+        },
+        pre_act=ZeroOpsPreAct(health_probe or _deterministic_tracer_health),
+        artifact_policy=ArtifactPolicy(),
+    )
+
+
+def create_software_engineer_broker(
+    *,
+    generated_prefix: str,
+    artifact_branch: str,
+    commit_executor: Callable[[ArtifactCommitArgs], dict[str, Any]],
+    health_probe: Callable[[], HealthSnapshot] | None = None,
+) -> CapabilityBroker:
+    """Build the candidate-branch broker for the Software Engineer worker."""
+
+    return CapabilityBroker(
+        contracts=[
+            WorkerContract(
+                contract_id="software-engineer-artifact-writer",
+                contract_version=1,
+                worker_id="software-engineer",
+                allowed_tools={"artifact.commit-candidate"},
+                allowed_artifact_prefixes={generated_prefix},
+                artifact_branch=artifact_branch,
+            )
+        ],
+        tools={
+            "artifact.commit-candidate": ToolSpec(
+                arguments_model=ArtifactCommitArgs,
+                category="mutation",
+                executor=commit_executor,
             )
         },
         pre_act=ZeroOpsPreAct(health_probe or _deterministic_tracer_health),

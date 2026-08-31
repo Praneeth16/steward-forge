@@ -1,5 +1,6 @@
 """Versioned contracts crossing the worker-to-broker boundary."""
 
+import hashlib
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,6 +24,7 @@ class WorkerContract(BaseModel):
     sandbox_catalog: str | None = None
     sandbox_schema: str | None = None
     allowed_artifact_prefixes: frozenset[str] = Field(default_factory=frozenset)
+    artifact_branch: str | None = None
 
 
 class MutationRequest(BaseModel):
@@ -114,6 +116,44 @@ class ArtifactWriteArgs(BaseModel):
     schema_version: Literal[1] = 1
     brief_id: str = Field(min_length=1)
     artifact: CandidateArtifact
+
+
+class DraftArtifact(BaseModel):
+    """One immutable file proposed for a broker-owned candidate commit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1)
+    content: str
+    sha: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def verify_sha(self) -> "DraftArtifact":
+        if hashlib.sha256(self.content.encode()).hexdigest() != self.sha:
+            raise ValueError("draft artifact SHA does not match its content")
+        return self
+
+
+class ArtifactCommitArgs(BaseModel):
+    """Typed request for one broker-owned commit on the candidate branch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["steward-forge.artifact-commit-args"] = (
+        "steward-forge.artifact-commit-args"
+    )
+    schema_version: Literal[1] = 1
+    branch: str = Field(min_length=1)
+    parent_sha: str = Field(pattern=r"^[a-f0-9]{64}$")
+    message: str = Field(min_length=1, max_length=200)
+    artifacts: tuple[DraftArtifact, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def paths_are_unique(self) -> "ArtifactCommitArgs":
+        paths = [artifact.path for artifact in self.artifacts]
+        if len(paths) != len(set(paths)):
+            raise ValueError("candidate artifact paths must be unique")
+        return self
 
 
 class MutationReceipt(BaseModel):
