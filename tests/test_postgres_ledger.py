@@ -184,5 +184,6 @@ def test_brief_to_receipt_survives_an_app_restart(postgres_url: str) -> None:
         state = restarted.get(brief["id"])
         assert state["status"] == "released"
         assert state["receipt"]["id"] == receipt_id
+        assert list(state["decisions"]) == ["restart-scope-1", "restart-release-1"]
     finally:
         restarted.close()

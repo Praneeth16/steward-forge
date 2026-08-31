@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from identity.context import ActorContext
 from identity.verifier import DatabricksIdentityVerifier, StaticIdentityVerifier
+from ledger import InMemoryLedger
 from workbench.app import create_app
 
 SUBMITTER_HEADERS = {"X-Forwarded-Access-Token": "submitter-token"}
@@ -205,3 +206,80 @@ def test_roles_rows_versions_and_sha_are_enforced_from_token_claims() -> None:
     )
     assert replay.status_code == 200
     assert replay.json()["event_count"] == released.json()["event_count"]
+
+
+def test_out_of_order_and_conflicting_decisions_are_logged_without_duplicate_approval() -> None:
+    ledger = InMemoryLedger()
+    client = TestClient(create_app(ledger=ledger, identity_verifier=_verifier()))
+    brief = client.post("/api/briefs", json=_payload(), headers=SUBMITTER_HEADERS).json()
+
+    out_of_order = client.post(
+        f"/api/briefs/{brief['id']}/release-decisions",
+        json={
+            "decision_id": "identity-early-release",
+            "decision": "approved",
+            "commit_sha": "0" * 64,
+        },
+        headers=APPROVER_HEADERS,
+    )
+    assert out_of_order.status_code == 409
+
+    stale_scope = client.post(
+        f"/api/briefs/{brief['id']}/scope-decisions",
+        json={
+            "decision_id": "identity-stale-scope-log",
+            "decision": "approved",
+            "scope_version": 99,
+        },
+        headers=APPROVER_HEADERS,
+    )
+    assert stale_scope.status_code == 409
+
+    scope_decision = {
+        "decision_id": "identity-single-scope-row",
+        "decision": "approved",
+        "scope_version": 1,
+    }
+    first = client.post(
+        f"/api/briefs/{brief['id']}/scope-decisions",
+        json=scope_decision,
+        headers=APPROVER_HEADERS,
+    )
+    replay = client.post(
+        f"/api/briefs/{brief['id']}/scope-decisions",
+        json=scope_decision,
+        headers=APPROVER_HEADERS,
+    )
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["event_count"] == replay.json()["event_count"]
+
+    wrong_sha = client.post(
+        f"/api/briefs/{brief['id']}/release-decisions",
+        json={
+            "decision_id": "identity-wrong-sha-log",
+            "decision": "approved",
+            "commit_sha": "0" * 64,
+        },
+        headers=APPROVER_HEADERS,
+    )
+    assert wrong_sha.status_code == 409
+
+    conflicting_replay = client.post(
+        f"/api/briefs/{brief['id']}/scope-decisions",
+        json=scope_decision | {"scope_version": 2},
+        headers=APPROVER_HEADERS,
+    )
+    assert conflicting_replay.status_code == 409
+
+    state = ledger.get(brief["id"])
+    assert list(state["decisions"]) == ["identity-single-scope-row"]
+    assert [
+        (event["gate"], event["reason"])
+        for event in state["events"]
+        if event["type"] == "security.denied"
+    ] == [
+        ("release", "release decision is not valid in the current state"),
+        ("scope", "scope decision does not match the current version"),
+        ("release", "release decision does not match the candidate SHA"),
+        ("scope", "decision ID was already used with different content"),
+    ]
