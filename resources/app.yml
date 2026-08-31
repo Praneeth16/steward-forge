@@ -3,7 +3,7 @@ resources:
     workbench:
       name: ${var.app_name}
       description: Governed brief-to-receipt workbench with verifiable evidence.
-      source_code_path: .
+      source_code_path: ..
       lifecycle:
         started: true
       config:

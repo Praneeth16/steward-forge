@@ -65,7 +65,10 @@ def test_workbench_app_uses_bundle_owned_lakebase_resources() -> None:
     app = document["resources"]["apps"]["workbench"]
 
     assert app["name"] == "${var.app_name}"
-    assert app["source_code_path"] == "."
+    assert app["source_code_path"] == ".."
+    source_root = (ROOT / "resources" / app["source_code_path"]).resolve()
+    assert (source_root / "app.py").is_file()
+    assert (source_root / "app.yaml").is_file()
     assert app["lifecycle"]["started"] is True
     postgres = next(resource["postgres"] for resource in app["resources"] if "postgres" in resource)
     assert postgres == {
