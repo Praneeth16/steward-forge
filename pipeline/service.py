@@ -8,14 +8,18 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from broker.contracts import SyntheticTableWriteArgs
-from broker.service import create_data_engineer_broker
+from broker.service import CapabilityBroker, LeaseFence, create_data_engineer_broker
 from gates.data import DataCandidateGate
 from workers.de.models import (
     DataEngineerReceipt,
     DataEngineerTask,
     ProgressEvent,
 )
-from workers.de.worker import DataEngineerExecution, DataEngineerWorker
+from workers.de.worker import (
+    DataEngineerCandidate,
+    DataEngineerExecution,
+    DataEngineerWorker,
+)
 
 
 class CatalogWriter(Protocol):
@@ -29,6 +33,14 @@ class DataEngineerRunResult:
     gate_results: dict[str, str]
     progress: tuple[ProgressEvent, ...]
     receipt: DataEngineerReceipt
+
+
+@dataclass(frozen=True, slots=True)
+class DataPublishSession:
+    """Task-scoped broker state retained across orchestrator retries."""
+
+    task: DataEngineerTask
+    broker: CapabilityBroker
 
 
 class DataEngineeringPipeline:
@@ -66,12 +78,42 @@ class DataEngineeringPipeline:
         )
 
     def run(self, task: DataEngineerTask) -> DataEngineerRunResult:
-        broker = create_data_engineer_broker(
-            sandbox_catalog=task.sandbox_catalog,
-            sandbox_schema=task.sandbox_schema,
-            table_writer=self._catalog.write,
-        )
-        candidate = self._worker.prepare(task)
+        candidate = self.prepare(task)
+        return self.publish(task, candidate)
+
+    def prepare(self, task: DataEngineerTask) -> DataEngineerCandidate:
+        """Perform read-only generation, repair, and artifact preparation."""
+
+        return self._worker.prepare(task)
+
+    def publish(
+        self,
+        task: DataEngineerTask,
+        candidate: DataEngineerCandidate,
+        *,
+        session: DataPublishSession | None = None,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
+        lease_fence: LeaseFence | None = None,
+    ) -> DataEngineerRunResult:
+        """Gate and publish a prepared candidate through the mutation broker.
+
+        A lease-bound publish without a supplied session creates a fenced broker
+        session from ``lease_fence``. Callers that retain a session across retries
+        must supply its fence when creating that session, not here.
+        """
+
+        if (lease_owner is None) != (lease_epoch is None):
+            raise ValueError("lease_owner and lease_epoch must be supplied together")
+        if session is not None and lease_fence is not None:
+            raise ValueError("session and lease_fence cannot both be supplied")
+        if lease_owner is not None and session is None and lease_fence is None:
+            raise ValueError("lease-bound publish requires lease_fence or a fenced session")
+
+        active_session = session or self.begin_publish(task, lease_fence=lease_fence)
+        if active_session.task != task:
+            raise ValueError("data publish session is bound to a different task")
+        broker = active_session.broker
         gate_results = self._gate.evaluate(task, candidate)
         gated_progress = candidate.progress + (
             ProgressEvent(
@@ -81,7 +123,13 @@ class DataEngineeringPipeline:
             ),
         )
         candidate = replace(candidate, progress=gated_progress)
-        execution = self._worker.publish(task, candidate, broker)
+        execution = self._worker.publish(
+            task,
+            candidate,
+            broker,
+            lease_owner=lease_owner,
+            lease_epoch=lease_epoch,
+        )
         progress = execution.progress
         receipt = _build_receipt(task, execution, gate_results)
         progress += (
@@ -98,6 +146,22 @@ class DataEngineeringPipeline:
             progress=progress,
             receipt=receipt,
         )
+
+    def begin_publish(
+        self,
+        task: DataEngineerTask,
+        *,
+        lease_fence: LeaseFence | None = None,
+    ) -> DataPublishSession:
+        """Create the broker session whose receipts make retries replay-safe."""
+
+        broker = create_data_engineer_broker(
+            sandbox_catalog=task.sandbox_catalog,
+            sandbox_schema=task.sandbox_schema,
+            table_writer=self._catalog.write,
+            lease_fence=lease_fence,
+        )
+        return DataPublishSession(task=task, broker=broker)
 
 
 def _build_receipt(

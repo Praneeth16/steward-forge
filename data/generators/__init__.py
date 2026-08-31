@@ -1,7 +1,12 @@
 """Deterministic generators for the Steward Forge engineering scenario."""
 
 from .backlog import generate_backlog
-from .common import build_namespace, canonical_jsonl, write_bundle
+from .common import (
+    build_namespace,
+    build_target_relations,
+    canonical_jsonl,
+    write_bundle,
+)
 from .costs import generate_costs
 from .pipelines import generate_pipeline_runs
 
@@ -19,6 +24,7 @@ def generate_all(seed: int, brief_id: str, run_id: str) -> dict[str, list[dict[s
 
 __all__ = [
     "build_namespace",
+    "build_target_relations",
     "canonical_jsonl",
     "generate_all",
     "generate_backlog",

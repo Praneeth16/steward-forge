@@ -27,6 +27,12 @@ class InMemoryCatalogAdapter:
             row_count=len(rows),
             data_sha256=hashlib.sha256(canonical_jsonl(rows)).hexdigest(),
         )
-        self.tables[relation] = tuple(rows)
-        self.write_events.append(output)
+        stored_rows = tuple(rows)
+        existing = self.tables.get(relation)
+        if existing is not None:
+            if existing != stored_rows:
+                raise ValueError("catalog relation is already bound to different rows")
+        else:
+            self.tables[relation] = stored_rows
+            self.write_events.append(output)
         return output.model_dump(mode="json")

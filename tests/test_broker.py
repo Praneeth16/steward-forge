@@ -123,6 +123,32 @@ def test_allowed_mutation_is_health_checked_and_idempotent() -> None:
     assert [event.outcome for event in broker.events] == ["allowed", "replayed"]
 
 
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"lease_owner": "worker-a"}, "owner and epoch"),
+        ({"lease_epoch": 1}, "owner and epoch"),
+        (
+            {
+                "workflow_id": "brief-1",
+                "lease_owner": "worker-a",
+                "lease_epoch": 1,
+            },
+            "configured durable fence",
+        ),
+    ],
+)
+def test_unfenced_broker_rejects_lease_metadata(
+    overrides: dict[str, object], reason: str
+) -> None:
+    broker = _broker(_healthy, [])
+
+    with pytest.raises(BrokerDenied, match=reason):
+        broker.execute(_request(**overrides))
+
+    assert broker.events[-1].outcome == "denied"
+
+
 def test_idempotency_key_is_bound_to_exact_request() -> None:
     broker = _broker(_healthy, [])
     broker.execute(_request())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -248,6 +249,98 @@ def test_reassignment_fences_stale_state_checkpoint_tool_and_receipt() -> None:
     assert current.epoch == 2
 
 
+def test_successful_worker_fence_renews_a_lease_that_expires_during_mutation() -> None:
+    controller, ledger, clock = _controller()
+    lease = controller.claim(
+        "brief-1", "data-engineer", "process-a", lease_seconds=5
+    )
+
+    with controller.worker_fence(
+        "brief-1", "data-engineer", lease.owner, lease.epoch
+    ):
+        clock.advance(6)
+
+    stored = ledger.get("brief-1")["recovery"]["workers"]["data-engineer"]
+    renewed = stored["lease"]
+    assert renewed["owner"] == lease.owner
+    assert renewed["epoch"] == lease.epoch
+    assert datetime.fromisoformat(renewed["heartbeat_at"]) == clock.now
+    assert datetime.fromisoformat(renewed["expires_at"]) == (
+        clock.now + timedelta(seconds=5)
+    )
+    controller.write_worker_state(
+        "brief-1", "data-engineer", lease.owner, lease.epoch, {"committed": True}
+    )
+
+
+def test_kill_waits_for_an_inflight_fenced_mutation_then_advances_epoch() -> None:
+    controller, _, _ = _controller()
+    lease = controller.claim(
+        "brief-1", "data-engineer", "process-a", lease_seconds=30
+    )
+    mutation_entered = threading.Event()
+    release_mutation = threading.Event()
+    kill_started = threading.Event()
+    writes: list[dict[str, Any]] = []
+
+    def write(arguments: SandboxWriteArgs) -> dict[str, Any]:
+        mutation_entered.set()
+        assert release_mutation.wait(timeout=2)
+        writes.append(arguments.model_dump(mode="json"))
+        return {"rows_written": len(arguments.rows)}
+
+    broker = CapabilityBroker(
+        contracts=[
+            WorkerContract(
+                contract_id="worker-contract",
+                contract_version=1,
+                worker_id="data-engineer",
+                allowed_tools={"sandbox.write"},
+                sandbox_catalog="steward",
+                sandbox_schema="sandbox",
+            )
+        ],
+        tools={
+            "sandbox.write": ToolSpec(
+                arguments_model=SandboxWriteArgs,
+                category="mutation",
+                executor=write,
+            )
+        },
+        pre_act=ZeroOpsPreAct(_healthy),
+        artifact_policy=ArtifactPolicy(),
+        lease_fence=controller.lease_fence,
+    )
+
+    def kill_worker():
+        kill_started.set()
+        return controller.kill(
+            "brief-1",
+            "data-engineer",
+            operation_id="kill-during-mutation",
+            checkpoint_payload={"reason": "operator stop"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        mutation = executor.submit(
+            broker.execute,
+            _request(lease.owner, lease.epoch, key="inflight-write"),
+        )
+        assert mutation_entered.wait(timeout=2)
+        kill = executor.submit(kill_worker)
+        assert kill_started.wait(timeout=2)
+        assert not kill.done()
+        release_mutation.set()
+        receipt = mutation.result(timeout=2)
+        kill.result(timeout=2)
+
+    assert len(writes) == 1
+    assert receipt.lease_owner == lease.owner
+    assert receipt.lease_epoch == lease.epoch
+    with pytest.raises(LeaseRejected, match="stale receipt"):
+        controller.validate_receipt("brief-1", receipt)
+
+
 def test_concurrent_transitions_commit_once_and_lost_ack_replays() -> None:
     controller, ledger, _ = _controller()
     lease = controller.claim("brief-1", "data-engineer", "process-a", lease_seconds=30)
@@ -270,6 +363,41 @@ def test_concurrent_transitions_commit_once_and_lost_ack_replays() -> None:
     worker = ledger.get("brief-1")["recovery"]["workers"]["data-engineer"]
     assert worker["workflow_step"] == "completed"
     assert list(worker["transitions"]) == ["task-completed"]
+
+
+def test_transition_replay_rejects_different_worker_or_delivery_state() -> None:
+    controller, _, _ = _controller()
+    lease = controller.claim(
+        "brief-1", "data-engineer", "process-a", lease_seconds=30
+    )
+    arguments = {
+        "brief_id": "brief-1",
+        "worker_id": "data-engineer",
+        "owner": lease.owner,
+        "epoch": lease.epoch,
+        "transition_id": "bounded-task-completed",
+        "expected_step": "planned",
+        "next_step": "succeeded",
+    }
+
+    controller.transition(
+        **arguments,
+        worker_state_updates={"attempt_count": 1},
+        commit_binding={"evidence_sequence": 8},
+    )
+
+    with pytest.raises(RecoveryError, match="different content"):
+        controller.transition(
+            **arguments,
+            worker_state_updates={"attempt_count": 2},
+            commit_binding={"evidence_sequence": 8},
+        )
+    with pytest.raises(RecoveryError, match="different content"):
+        controller.transition(
+            **arguments,
+            worker_state_updates={"attempt_count": 1},
+            commit_binding={"evidence_sequence": 9},
+        )
 
 
 def test_checkpoint_lost_ack_replay_returns_the_original_record() -> None:

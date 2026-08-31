@@ -134,6 +134,17 @@ def build_namespace(brief_id: str, run_id: str) -> str:
     return namespace
 
 
+def build_target_relations(
+    catalog: str, sandbox_schema: str, namespace: str
+) -> tuple[str, ...]:
+    """Return the ordered governed relations for one synthetic data run."""
+
+    return tuple(
+        f"{catalog}.{sandbox_schema}.{namespace}__{dataset}"
+        for dataset in TABLE_SCHEMAS
+    )
+
+
 def validate_namespace(namespace: str) -> None:
     if _SAFE_NAMESPACE.fullmatch(namespace) is None or len(namespace) > 239:
         raise ValueError(

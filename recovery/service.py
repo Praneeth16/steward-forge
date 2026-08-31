@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
@@ -196,12 +197,19 @@ class RecoveryController:
         transition_id: str,
         expected_step: str,
         next_step: str,
+        worker_state_updates: Mapping[str, Any] | None = None,
+        commit_binding: Mapping[str, Any] | None = None,
+        on_commit: Callable[[dict[str, Any]], None] | None = None,
+        release_lease: bool = False,
     ) -> TransitionResult:
         now = self._now()
         requested = {
             "lease_epoch": epoch,
             "expected_step": expected_step,
             "next_step": next_step,
+            "worker_state_sha256": self._binding_hash(worker_state_updates),
+            "commit_binding_sha256": self._binding_hash(commit_binding),
+            "release_lease": release_lease,
         }
         with self._ledger.transaction(brief_id) as state:
             worker = self._worker(state, worker_id)
@@ -223,6 +231,15 @@ class RecoveryController:
                 )
             worker["workflow_step"] = next_step
             worker["transitions"][transition_id] = requested
+            if worker_state_updates is not None:
+                worker["worker_state"].update(
+                    deepcopy(dict(worker_state_updates))
+                )
+            if on_commit is not None:
+                on_commit(state)
+            if release_lease:
+                worker["lease"] = None
+                worker["status"] = "idle"
             self._event(
                 state,
                 "worker.transitioned",
@@ -247,18 +264,61 @@ class RecoveryController:
             or request.lease_epoch is None
         ):
             raise BrokerDenied("lease-bound broker fields are required")
-        with self._ledger.transaction(request.workflow_id) as state:
-            worker = self._worker(state, request.worker_id)
-            try:
-                self._assert_lease(
-                    worker,
-                    request.lease_owner,
-                    request.lease_epoch,
-                    self._now(),
-                )
-            except LeaseRejected as error:
-                raise BrokerDenied(str(error)) from error
+        try:
+            with self.worker_fence(
+                request.workflow_id,
+                request.worker_id,
+                request.lease_owner,
+                request.lease_epoch,
+            ):
+                yield
+        except LeaseRejected as error:
+            raise BrokerDenied(str(error)) from error
+
+    @contextmanager
+    def worker_fence(
+        self,
+        brief_id: str,
+        worker_id: str,
+        owner: str,
+        epoch: int,
+    ) -> Iterator[None]:
+        """Hold the durable workflow row while one governed mutation executes."""
+
+        with self._ledger.transaction(brief_id) as state:
+            worker = self._worker(state, worker_id)
+            lease = self._assert_lease(worker, owner, epoch, self._now())
+            lease_seconds = int(
+                (lease.expires_at - lease.heartbeat_at).total_seconds()
+            )
+            if lease_seconds <= 0:
+                raise LeaseRejected("active lease has no renewable duration")
             yield
+            renewed_at = self._now()
+            current = self._lease(worker)
+            if (
+                worker["status"] != "running"
+                or current is None
+                or current.owner != owner
+                or current.epoch != epoch
+                or int(worker["epoch"]) != epoch
+            ):
+                raise LeaseRejected("stale lease owner or epoch was rejected")
+            renewed = WorkerLease(
+                worker_id=worker_id,
+                owner=owner,
+                heartbeat_at=renewed_at,
+                expires_at=renewed_at + timedelta(seconds=lease_seconds),
+                epoch=epoch,
+            )
+            worker["lease"] = renewed.model_dump(mode="json")
+            self._event(
+                state,
+                "worker.fence-renewed",
+                worker_id=worker_id,
+                owner=owner,
+                epoch=epoch,
+            )
 
     def validate_receipt(self, brief_id: str, receipt: MutationReceipt) -> None:
         if (
@@ -719,6 +779,15 @@ class RecoveryController:
     def _operation_checkpoint_id(kind: str, operation_id: str) -> str:
         digest = hashlib.sha256(f"{kind}:{operation_id}".encode()).hexdigest()[:20]
         return f"{kind}-{digest}"
+
+    @staticmethod
+    def _binding_hash(value: Mapping[str, Any] | None) -> str | None:
+        if value is None:
+            return None
+        canonical = json.dumps(
+            dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
 
     @staticmethod
     def _event(state: dict[str, Any], event_type: str, **details: Any) -> None:

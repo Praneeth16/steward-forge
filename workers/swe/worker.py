@@ -74,7 +74,12 @@ class SoftwareEngineerWorker:
         )
 
     def propose_candidate_commit(
-        self, task: SoftwareEngineerTask, candidate: SoftwareCandidate
+        self,
+        task: SoftwareEngineerTask,
+        candidate: SoftwareCandidate,
+        *,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
     ) -> MutationRequest:
         arguments = ArtifactCommitArgs(
             branch=task.artifact_branch,
@@ -87,6 +92,8 @@ class SoftwareEngineerWorker:
             contract_version=self.contract_version,
             worker_id=self.worker_id,
             workflow_id=task.brief_id,
+            lease_owner=lease_owner,
+            lease_epoch=lease_epoch,
             tool_id="artifact.commit-candidate",
             arguments=arguments.model_dump(mode="json"),
             idempotency_key=f"{task.task_id}:candidate:{candidate.candidate_sha}:v1",

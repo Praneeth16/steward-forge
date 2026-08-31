@@ -8,7 +8,12 @@ from dataclasses import dataclass
 
 from broker.contracts import MutationReceipt, MutationRequest, SyntheticTableWriteArgs
 from broker.service import CapabilityBroker
-from data.generators import build_namespace, canonical_jsonl, generate_all
+from data.generators import (
+    build_namespace,
+    build_target_relations,
+    canonical_jsonl,
+    generate_all,
+)
 from data.generators.common import CANARY_PLACEMENTS, PRIMARY_KEYS, TABLE_SCHEMAS
 from data.quality import evaluate_all
 from data.repair import repair_documented_defects
@@ -79,6 +84,8 @@ class DataEngineerWorker:
         *,
         catalog: str | None = None,
         schema: str | None = None,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
     ) -> MutationRequest:
         namespace = build_namespace(task.brief_id, task.run_id)
         arguments = SyntheticTableWriteArgs(
@@ -93,6 +100,8 @@ class DataEngineerWorker:
             contract_version=self.contract_version,
             worker_id=self.worker_id,
             workflow_id=task.brief_id,
+            lease_owner=lease_owner,
+            lease_epoch=lease_epoch,
             tool_id="sandbox.write-synthetic-table",
             arguments=arguments.model_dump(mode="json", by_alias=True),
             idempotency_key=f"{task.task_id}:publish:{dataset}:v1",
@@ -131,9 +140,8 @@ class DataEngineerWorker:
         record("quality.passed", "All quality expectations pass after one bounded repair.")
 
         artifacts = _build_artifacts(namespace)
-        targets = tuple(
-            f"{task.sandbox_catalog}.{task.sandbox_schema}.{namespace}__{dataset}"
-            for dataset in TABLE_SCHEMAS
+        targets = build_target_relations(
+            task.sandbox_catalog, task.sandbox_schema, namespace
         )
         lineage = LineageRecord(
             namespace=namespace,
@@ -160,10 +168,19 @@ class DataEngineerWorker:
         task: DataEngineerTask,
         candidate: DataEngineerCandidate,
         broker: CapabilityBroker,
+        *,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
     ) -> DataEngineerExecution:
         receipts = tuple(
             broker.execute(
-                self.propose_table_write(task, dataset, candidate.tables[dataset])
+                self.propose_table_write(
+                    task,
+                    dataset,
+                    candidate.tables[dataset],
+                    lease_owner=lease_owner,
+                    lease_epoch=lease_epoch,
+                )
             )
             for dataset in TABLE_SCHEMAS
         )

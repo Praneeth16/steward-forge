@@ -19,7 +19,7 @@ The project is under active construction. The issue tracker is the execution que
 
 The bundle will create a dedicated Autoscaling Lakebase project and database, dedicated schemas in a caller-supplied writable Unity Catalog catalog, applications, experiments, jobs, and dashboards. Catalog storage is an account-level prerequisite because some workspaces do not permit catalog creation through the Catalog API. Steward Forge will not adopt existing application schemas or Lakebase resources. Environment-specific values belong in bundle variables or local authentication profiles, never in committed source.
 
-See [the public build plan](docs/plans/steward-forge-build-plan.md), [product vision](docs/vision/steward-forge-vision.md), and [recovery contract](docs/security/recovery.md).
+See [the public build plan](docs/plans/steward-forge-build-plan.md), [product vision](docs/vision/steward-forge-vision.md), [four-worker orchestration](docs/architecture/four-worker-orchestration.md), and [recovery contract](docs/security/recovery.md).
 
 ## Deploy the foundation
 

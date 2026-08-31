@@ -260,6 +260,96 @@ def test_prepare_replay_returns_the_original_broker_commit() -> None:
     assert repository.commit_calls == 1
 
 
+def test_restore_prepared_fails_closed_when_committed_bytes_are_unavailable() -> None:
+    service, _, _ = _service()
+    prepared = service.prepare(_task())
+    restarted = SoftwareReleaseService(
+        InMemoryArtifactRepository(BASE_SHA),
+        InMemoryDeploymentAdapter(),
+    )
+
+    with pytest.raises(ReleaseDenied, match="committed artifacts are unavailable"):
+        restarted.restore_prepared(prepared)
+
+
+@pytest.mark.parametrize(
+    "receipt_update",
+    [
+        lambda prepared: {"worker_id": "other-worker"},
+        lambda prepared: {
+            "result": prepared.commit.model_copy(
+                update={"branch": "steward-forge/tampered"}
+            ).model_dump(mode="json")
+        },
+    ],
+    ids=["binding-metadata", "commit-result"],
+)
+def test_restore_prepared_rejects_tampered_broker_receipt(
+    receipt_update,
+) -> None:
+    service, repository, deployer = _service()
+    prepared = service.prepare(_task())
+    tampered = prepared.model_copy(
+        update={
+            "broker_receipt": prepared.broker_receipt.model_copy(
+                update=receipt_update(prepared)
+            )
+        }
+    )
+    restarted = SoftwareReleaseService(repository, deployer)
+
+    with pytest.raises(ReleaseDenied, match="broker receipt"):
+        restarted.restore_prepared(tampered)
+
+    assert deployer.deploy_calls == 0
+
+
+@pytest.mark.parametrize(
+    "prepared_update",
+    [
+        lambda prepared: {
+            "candidate": prepared.candidate.model_copy(
+                update={
+                    "artifacts": (
+                        _artifact(prepared.candidate.artifacts[0].path, "tampered bytes"),
+                        *prepared.candidate.artifacts[1:],
+                    )
+                }
+            )
+        },
+        lambda prepared: {
+            "commit": prepared.commit.model_copy(
+                update={"branch": "steward-forge/tampered"}
+            )
+        },
+    ],
+    ids=["candidate-artifacts", "commit-binding"],
+)
+def test_restore_prepared_rejects_tampered_candidate_or_commit(prepared_update) -> None:
+    service, repository, deployer = _service()
+    prepared = service.prepare(_task())
+    restarted = SoftwareReleaseService(repository, deployer)
+
+    with pytest.raises(ReleaseDenied, match="broker receipt"):
+        restarted.restore_prepared(prepared.model_copy(update=prepared_update(prepared)))
+
+    assert deployer.deploy_calls == 0
+
+
+def test_restore_prepared_rejects_a_tampered_gate_report() -> None:
+    service, repository, deployer = _service()
+    prepared = service.prepare(_task())
+    tampered = prepared.model_copy(
+        update={"gates": prepared.gates.model_copy(update={"passed": False})}
+    )
+    restarted = SoftwareReleaseService(repository, deployer)
+
+    with pytest.raises(ReleaseDenied, match="gate report"):
+        restarted.restore_prepared(tampered)
+
+    assert deployer.deploy_calls == 0
+
+
 def test_sha_approval_is_exact_and_candidate_must_descend_from_trusted_base() -> None:
     service, repository, _ = _service()
     prepared = service.prepare(_task())

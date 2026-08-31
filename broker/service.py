@@ -25,6 +25,26 @@ from broker.contracts import (
 from broker.security import contains_secret
 from broker.zero_ops import HealthSnapshot, PreActDenied, ZeroOpsPreAct
 
+LeaseFence = Callable[[MutationRequest], AbstractContextManager[None]]
+
+
+def mutation_request_hash(request: MutationRequest) -> str:
+    """Return the canonical request digest used to bind broker receipts."""
+
+    return hashlib.sha256(
+        json.dumps(
+            request.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def mutation_receipt_id(request_hash: str) -> str:
+    """Derive the deterministic receipt identifier for a request digest."""
+
+    return hashlib.sha256(f"receipt:{request_hash}".encode()).hexdigest()[:24]
+
 
 class BrokerDenied(ValueError):
     """A worker request failed deterministic broker validation."""
@@ -110,10 +130,7 @@ class CapabilityBroker:
         tools: dict[str, ToolSpec],
         pre_act: ZeroOpsPreAct,
         artifact_policy: ArtifactPolicy,
-        lease_fence: Callable[
-            [MutationRequest], AbstractContextManager[None]
-        ]
-        | None = None,
+        lease_fence: LeaseFence | None = None,
     ) -> None:
         self._contracts = {
             (contract.contract_id, contract.contract_version): contract
@@ -152,9 +169,7 @@ class CapabilityBroker:
                     self._pre_act.authorize(tool.category)
                     result = tool.executor(parsed)
                     receipt = MutationReceipt(
-                        receipt_id=hashlib.sha256(
-                            f"receipt:{request_hash}".encode()
-                        ).hexdigest()[:24],
+                        receipt_id=mutation_receipt_id(request_hash),
                         request_hash=request_hash,
                         worker_id=contract.worker_id,
                         workflow_id=request.workflow_id,
@@ -178,6 +193,12 @@ class CapabilityBroker:
     def _validate(
         self, request: MutationRequest
     ) -> tuple[WorkerContract, ToolSpec, BaseModel, str]:
+        if (request.lease_owner is None) != (request.lease_epoch is None):
+            raise BrokerDenied("lease owner and epoch must be supplied together")
+        if request.lease_owner is not None and (
+            request.workflow_id is None or self._lease_fence is None
+        ):
+            raise BrokerDenied("lease-bound requests require a configured durable fence")
         contract = self._contracts.get((request.contract_id, request.contract_version))
         if contract is None or contract.worker_id != request.worker_id:
             raise BrokerDenied("worker contract is not registered")
@@ -206,13 +227,7 @@ class CapabilityBroker:
                 if artifact.path.rstrip("/") in contract.allowed_artifact_prefixes:
                     raise BrokerDenied("artifact path must name a file below the generated prefix")
                 self._artifact_policy.validate_artifact_path(artifact.path)
-        request_hash = hashlib.sha256(
-            json.dumps(
-                request.model_dump(mode="json"),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        request_hash = mutation_request_hash(request)
         return contract, tool, parsed, request_hash
 
     def _event(
@@ -287,6 +302,7 @@ def create_data_engineer_broker(
     sandbox_schema: str,
     table_writer: Callable[[SyntheticTableWriteArgs], dict[str, Any]],
     health_probe: Callable[[], HealthSnapshot] | None = None,
+    lease_fence: LeaseFence | None = None,
 ) -> CapabilityBroker:
     """Build the versioned, sandbox-only broker for the Data Engineer worker."""
 
@@ -314,6 +330,7 @@ def create_data_engineer_broker(
         },
         pre_act=ZeroOpsPreAct(health_probe or _deterministic_tracer_health),
         artifact_policy=ArtifactPolicy(),
+        lease_fence=lease_fence,
     )
 
 
@@ -323,6 +340,7 @@ def create_software_engineer_broker(
     artifact_branch: str,
     commit_executor: Callable[[ArtifactCommitArgs], dict[str, Any]],
     health_probe: Callable[[], HealthSnapshot] | None = None,
+    lease_fence: LeaseFence | None = None,
 ) -> CapabilityBroker:
     """Build the candidate-branch broker for the Software Engineer worker."""
 
@@ -346,6 +364,7 @@ def create_software_engineer_broker(
         },
         pre_act=ZeroOpsPreAct(health_probe or _deterministic_tracer_health),
         artifact_policy=ArtifactPolicy(),
+        lease_fence=lease_fence,
     )
 
 

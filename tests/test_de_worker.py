@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -120,6 +121,105 @@ def test_integration_covers_task_execution_catalog_gate_progress_and_receipt() -
     assert result.receipt.catalog_relations == result.execution.lineage.targets
     assert result.receipt.repair_attempts == 1
     assert len(result.receipt.mutation_receipt_ids) == 3
+
+
+def test_pipeline_publish_allows_an_unleased_default_session() -> None:
+    adapter = InMemoryCatalogAdapter()
+    pipeline = DataEngineeringPipeline(adapter)
+    task = _task()
+
+    result = pipeline.publish(task, pipeline.prepare(task))
+
+    assert len(adapter.write_events) == 3
+    assert {receipt.lease_owner for receipt in result.execution.mutation_receipts} == {
+        None
+    }
+    assert {receipt.lease_epoch for receipt in result.execution.mutation_receipts} == {
+        None
+    }
+
+
+def test_pipeline_publish_builds_a_fenced_default_session_for_lease_bound_work() -> None:
+    adapter = InMemoryCatalogAdapter()
+    pipeline = DataEngineeringPipeline(adapter)
+    task = _task()
+    fenced_requests: list[tuple[str | None, int | None]] = []
+
+    @contextmanager
+    def fence(request):
+        fenced_requests.append((request.lease_owner, request.lease_epoch))
+        yield
+
+    result = pipeline.publish(
+        task,
+        pipeline.prepare(task),
+        lease_owner="worker-a",
+        lease_epoch=1,
+        lease_fence=fence,
+    )
+
+    assert fenced_requests == [("worker-a", 1)] * 3
+    receipt_leases = {
+        (receipt.lease_owner, receipt.lease_epoch)
+        for receipt in result.execution.mutation_receipts
+    }
+    assert receipt_leases == {
+        ("worker-a", 1)
+    }
+
+
+@pytest.mark.parametrize(
+    "lease_metadata",
+    [
+        {"lease_owner": "worker-a"},
+        {"lease_epoch": 1},
+    ],
+)
+def test_pipeline_publish_rejects_partial_lease_metadata_at_its_boundary(
+    lease_metadata: dict[str, object],
+) -> None:
+    adapter = InMemoryCatalogAdapter()
+    pipeline = DataEngineeringPipeline(adapter)
+    task = _task()
+
+    with pytest.raises(
+        ValueError, match="lease_owner and lease_epoch must be supplied together"
+    ):
+        pipeline.publish(task, pipeline.prepare(task), **lease_metadata)
+
+    assert adapter.write_events == []
+
+
+def test_pipeline_publish_rejects_lease_metadata_without_a_default_session_fence() -> None:
+    adapter = InMemoryCatalogAdapter()
+    pipeline = DataEngineeringPipeline(adapter)
+    task = _task()
+
+    with pytest.raises(ValueError, match="lease-bound publish requires lease_fence"):
+        pipeline.publish(
+            task,
+            pipeline.prepare(task),
+            lease_owner="worker-a",
+            lease_epoch=1,
+        )
+
+    assert adapter.write_events == []
+
+
+def test_pipeline_publish_rejects_ambiguous_session_and_lease_fence() -> None:
+    adapter = InMemoryCatalogAdapter()
+    pipeline = DataEngineeringPipeline(adapter)
+    task = _task()
+
+    with pytest.raises(ValueError, match="session and lease_fence cannot both be supplied"):
+        pipeline.publish(
+            task,
+            pipeline.prepare(task),
+            session=pipeline.begin_publish(task),
+            lease_fence=lambda request: None,
+        )
+
+    assert adapter.write_events == []
 
 
 def test_broker_replay_does_not_repeat_catalog_writes() -> None:

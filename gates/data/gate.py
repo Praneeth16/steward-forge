@@ -6,7 +6,7 @@ import ast
 import hashlib
 import json
 
-from data.generators import canonical_jsonl
+from data.generators import build_target_relations, canonical_jsonl
 from data.generators.common import TABLE_SCHEMAS
 from workers.de.models import DataEngineerTask
 from workers.de.worker import (
@@ -118,9 +118,8 @@ class DataCandidateGate:
         expected_sources = tuple(
             f"steward-forge-generator:v1:{dataset}" for dataset in TABLE_SCHEMAS
         )
-        expected_targets = tuple(
-            f"{task.sandbox_catalog}.{task.sandbox_schema}.{namespace}__{dataset}"
-            for dataset in TABLE_SCHEMAS
+        expected_targets = build_target_relations(
+            task.sandbox_catalog, task.sandbox_schema, namespace
         )
         return (
             candidate.lineage.sources == expected_sources
