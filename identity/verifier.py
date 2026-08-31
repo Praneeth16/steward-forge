@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Protocol
 
 from databricks.sdk import WorkspaceClient
 
 from identity.context import ActorContext, Role
+
+LOGGER = logging.getLogger(__name__)
 
 
 class IdentityVerificationError(ValueError):
@@ -46,12 +49,19 @@ class DatabricksIdentityVerifier:
     def verify(self, token: str) -> ActorContext:
         if not token:
             raise IdentityVerificationError("forwarded user token is required")
+        token = token.removeprefix("Bearer ").strip()
+        if not token:
+            raise IdentityVerificationError("forwarded user token is required")
         host = os.environ.get("DATABRICKS_HOST", "")
         if host and not host.startswith("http"):
             host = f"https://{host}"
         try:
             user = WorkspaceClient(host=host or None, token=token).current_user.me()
         except Exception as error:
+            LOGGER.warning(
+                "Forwarded user token validation failed with %s",
+                type(error).__name__,
+            )
             raise IdentityVerificationError("user token is invalid") from error
         if not user.id:
             raise IdentityVerificationError("validated user has no stable subject")

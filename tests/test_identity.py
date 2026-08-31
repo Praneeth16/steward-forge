@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from identity.context import ActorContext
-from identity.verifier import StaticIdentityVerifier
+from identity.verifier import DatabricksIdentityVerifier, StaticIdentityVerifier
 from workbench.app import create_app
 
 SUBMITTER_HEADERS = {"X-Forwarded-Access-Token": "submitter-token"}
@@ -59,6 +61,35 @@ def test_missing_or_unknown_user_token_is_rejected() -> None:
         ).status_code
         == 401
     )
+
+
+def test_databricks_verifier_normalizes_bearer_and_maps_groups(monkeypatch) -> None:
+    observed: dict[str, str] = {}
+
+    class FakeCurrentUser:
+        @staticmethod
+        def me():
+            return SimpleNamespace(
+                id="workspace-subject",
+                groups=[SimpleNamespace(display="Forge Approvers")],
+            )
+
+    class FakeWorkspaceClient:
+        def __init__(self, *, host: str, token: str) -> None:
+            observed.update(host=host, token=token)
+            self.current_user = FakeCurrentUser()
+
+    monkeypatch.setenv("DATABRICKS_HOST", "workspace.example.invalid")
+    monkeypatch.setattr("identity.verifier.WorkspaceClient", FakeWorkspaceClient)
+    verifier = DatabricksIdentityVerifier(role_groups={"approver": "Forge Approvers"})
+
+    actor = verifier.verify("Bearer forwarded-token")
+
+    assert actor == ActorContext(subject="workspace-subject", roles={"approver"})
+    assert observed == {
+        "host": "https://workspace.example.invalid",
+        "token": "forwarded-token",
+    }
 
 
 def test_body_supplied_actor_identity_is_rejected() -> None:
