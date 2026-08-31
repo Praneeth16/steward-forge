@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Steward Forge</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+      body { margin: 0; background: #0b0d0e; color: #f4f0e8; }
+      main { max-width: 780px; margin: 0 auto; padding: 5rem 1.5rem; }
+      h1 { font-size: clamp(2.8rem, 9vw, 6rem); margin: 0; letter-spacing: -0.06em; }
+      .eyebrow { color: #ef7d3c; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+      .lede { color: #b8b8b0; font-size: 1.2rem; max-width: 52ch; }
+      form, section { background: #151819; border: 1px solid #303536; padding: 1.4rem; margin-top: 2rem; }
+      label { display: block; margin-top: 1rem; color: #d4d2cb; }
+      input, textarea { box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .75rem; background: #0b0d0e; color: #fff; border: 1px solid #4a5051; }
+      button { margin-top: 1.25rem; padding: .8rem 1rem; background: #ef7d3c; border: 0; color: #15100c; font-weight: 800; cursor: pointer; }
+      button + button { margin-left: .5rem; background: #f4f0e8; }
+      button:disabled { cursor: wait; opacity: .45; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #bfe8d0; }
+      [hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Governed digital delivery</p>
+      <h1>Steward Forge</h1>
+      <p class="lede">Submit a brief, bind human decisions to exact versions, and follow one bounded task to a verifiable release receipt.</p>
+
+      <form id="brief-form">
+        <h2>New engineering brief</h2>
+        <label>Title<input id="title" value="Delivery health signal" required></label>
+        <label>Business question<textarea id="question" required>Which fictional teams need pipeline help?</textarea></label>
+        <label>Cost ceiling (USD)<input id="budget" type="number" min="1" value="5" required></label>
+        <button type="submit">Submit brief</button>
+      </form>
+
+      <section id="progress" hidden aria-live="polite">
+        <h2>Run state</h2>
+        <p id="status">Ready</p>
+        <button id="scope-button">Approve scope v1</button>
+        <button id="release-button" disabled>Approve release</button>
+        <pre id="state"></pre>
+      </section>
+    </main>
+    <script>
+      const form = document.querySelector("#brief-form");
+      const progress = document.querySelector("#progress");
+      const status = document.querySelector("#status");
+      const state = document.querySelector("#state");
+      const scopeButton = document.querySelector("#scope-button");
+      const releaseButton = document.querySelector("#release-button");
+      let brief;
+
+      function render(next) {
+        brief = next;
+        progress.hidden = false;
+        status.textContent = `Status: ${brief.status}`;
+        state.textContent = JSON.stringify(brief.receipt || brief, null, 2);
+        scopeButton.disabled = brief.status !== "scope_pending";
+        releaseButton.disabled = brief.status !== "pending_release";
+      }
+
+      async function post(path, body) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) throw new Error((await response.json()).detail || "Request failed");
+        return response.json();
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const key = `workbench-${crypto.randomUUID()}`;
+        render(await post("/api/briefs", {
+          title: document.querySelector("#title").value,
+          business_question: document.querySelector("#question").value,
+          acceptance_tests: [{
+            name: "output_has_team",
+            description: "Every output row names a fictional team.",
+            kind: "schema",
+          }],
+          cost_ceiling_usd: Number(document.querySelector("#budget").value),
+          submitted_by: "demo-submitter",
+          release_approver: "demo-approver",
+          idempotency_key: key,
+        }));
+      });
+
+      scopeButton.addEventListener("click", async () => {
+        render(await post(`/api/briefs/${brief.id}/scope-decisions`, {
+          decision_id: `scope-${crypto.randomUUID()}`,
+          decision: "approved",
+          scope_version: brief.scope_version,
+          actor: "demo-approver",
+        }));
+      });
+
+      releaseButton.addEventListener("click", async () => {
+        render(await post(`/api/briefs/${brief.id}/release-decisions`, {
+          decision_id: `release-${crypto.randomUUID()}`,
+          decision: "approved",
+          commit_sha: brief.candidate_sha,
+          actor: "demo-approver",
+        }));
+      });
+    </script>
+  </body>
+</html>
