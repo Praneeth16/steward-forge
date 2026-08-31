@@ -53,6 +53,7 @@ def _request(**overrides: Any) -> MutationRequest:
 def _healthy() -> HealthSnapshot:
     return HealthSnapshot(
         lakebase_available=True,
+        lakebase_fresh=True,
         pipeline_fresh=True,
         unity_catalog_fresh=True,
     )
@@ -200,3 +201,35 @@ def test_zero_ops_errors_fail_closed_but_evidence_remains_available() -> None:
         )
     )
     assert evidence.result == {"event_id": "event-1"}
+
+
+def test_zero_ops_malformed_probe_result_fails_closed() -> None:
+    broker = _broker(lambda: object(), [])
+
+    with pytest.raises(BrokerDenied, match="pre-act health check failed"):
+        broker.execute(_request())
+
+
+@pytest.mark.parametrize(
+    ("unhealthy_field", "reason_pattern"),
+    [
+        ("lakebase_available", "Lakebase.*unavailable"),
+        ("lakebase_fresh", "Lakebase.*stale"),
+        ("pipeline_fresh", "pipeline.*stale"),
+        ("unity_catalog_fresh", "Unity Catalog.*stale"),
+    ],
+)
+def test_zero_ops_explicitly_denies_each_unhealthy_dependency(
+    unhealthy_field: str, reason_pattern: str
+) -> None:
+    values = {
+        "lakebase_available": True,
+        "lakebase_fresh": True,
+        "pipeline_fresh": True,
+        "unity_catalog_fresh": True,
+    }
+    values[unhealthy_field] = False
+    broker = _broker(lambda: HealthSnapshot(**values), [])
+
+    with pytest.raises(BrokerDenied, match=reason_pattern):
+        broker.execute(_request())

@@ -1,14 +1,24 @@
 """In-process orchestration for the first end-to-end tracer."""
 
 import hashlib
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
 
+from broker.contracts import ArtifactWriteArgs, MutationReceipt, MutationRequest, TaskRecordArgs
+from broker.service import BrokerDenied, CapabilityBroker, create_tracer_broker
+from broker.zero_ops import HealthSnapshot
 from gates.release import ReleaseAdapter
 from gates.test_gate import TestGate
 from identity import AccessDenied, ActorContext, AuthorizationPolicy
 from ledger import InMemoryLedger, Ledger
-from orchestrator.models import BriefSubmission, ReleaseDecision, ScopeDecision
+from orchestrator.models import (
+    BriefSubmission,
+    CandidateArtifact,
+    PlannedTask,
+    ReleaseDecision,
+    ScopeDecision,
+)
 from workers.sm import ScrumMasterWorker
 
 
@@ -23,10 +33,16 @@ class Orchestrator:
         self,
         ledger: Ledger | None = None,
         policy: AuthorizationPolicy | None = None,
+        worker: ScrumMasterWorker | None = None,
+        broker: CapabilityBroker | None = None,
+        health_probe: Callable[[], HealthSnapshot] | None = None,
     ) -> None:
+        if broker is not None and health_probe is not None:
+            raise ValueError("provide a broker or a health probe, not both")
         self.ledger = ledger or InMemoryLedger()
         self._policy = policy or AuthorizationPolicy()
-        self._worker = ScrumMasterWorker()
+        self._worker = worker or ScrumMasterWorker()
+        self._broker = broker or create_tracer_broker(health_probe)
         self._gate = TestGate()
         self._release = ReleaseAdapter()
 
@@ -42,6 +58,7 @@ class Orchestrator:
             "submitted_by": actor.subject,
             "brief": submission.model_dump(mode="json"),
             "tasks": [],
+            "mutation_receipts": [],
             "candidate_sha": None,
             "receipt": None,
             "decisions": {},
@@ -76,13 +93,26 @@ class Orchestrator:
                     return self._render(state)
 
                 brief = BriefSubmission.model_validate(state["brief"])
-                task = self._worker.plan(brief_id, brief)
-                candidate = self._worker.run_specialist_stub(brief_id, brief, task)
+                task_request = MutationRequest.model_validate(
+                    self._worker.propose_task(brief_id, brief)
+                )
+                task_receipt = self._broker.execute(task_request)
+                task = self._consume_task_receipt(task_receipt, brief_id)
+
+                candidate_request = MutationRequest.model_validate(
+                    self._worker.propose_candidate(brief_id, brief, task)
+                )
+                candidate_receipt = self._broker.execute(candidate_request)
+                candidate = self._consume_candidate_receipt(candidate_receipt, brief_id)
                 test_results = self._gate.evaluate(candidate)
                 if "failed" in test_results.values():
                     raise WorkflowError("candidate failed the deterministic test gate")
 
                 state["tasks"] = [task.model_dump(mode="json")]
+                state["mutation_receipts"] = [
+                    task_receipt.model_dump(mode="json"),
+                    candidate_receipt.model_dump(mode="json"),
+                ]
                 state["candidate"] = candidate.model_dump(mode="json")
                 state["candidate_sha"] = candidate.sha
                 state["test_results"] = test_results
@@ -100,6 +130,9 @@ class Orchestrator:
                     ]
                 )
                 return self._render(state)
+        except BrokerDenied as error:
+            self._log_denial(brief_id, "broker", actor, str(error))
+            raise WorkflowError(f"worker mutation denied by broker: {error}") from error
         except (AccessDenied, WorkflowError) as error:
             self._log_denial(brief_id, "scope", actor, str(error))
             raise
@@ -123,8 +156,6 @@ class Orchestrator:
                     self._record_decision(state, decision.decision_id, payload)
                     state["events"].append({"type": "release.rejected", "actor": actor.subject})
                     return self._render(state)
-
-                from orchestrator.models import CandidateArtifact
 
                 candidate = CandidateArtifact.model_validate(state["candidate"])
                 receipt = self._release.release(brief_id, candidate, state["test_results"])
@@ -162,6 +193,26 @@ class Orchestrator:
                     "reason": reason,
                 }
             )
+
+    @staticmethod
+    def _consume_task_receipt(receipt: MutationReceipt, brief_id: str) -> PlannedTask:
+        if receipt.tool_id != "workflow.record-task":
+            raise WorkflowError("broker returned the wrong task receipt type")
+        record = TaskRecordArgs.model_validate(receipt.result)
+        if record.brief_id != brief_id or record.task.worker_id != receipt.worker_id:
+            raise WorkflowError("task receipt is not bound to this brief and worker")
+        return record.task
+
+    @staticmethod
+    def _consume_candidate_receipt(
+        receipt: MutationReceipt, brief_id: str
+    ) -> CandidateArtifact:
+        if receipt.tool_id != "artifact.accept-candidate":
+            raise WorkflowError("broker returned the wrong candidate receipt type")
+        record = ArtifactWriteArgs.model_validate(receipt.result)
+        if record.brief_id != brief_id:
+            raise WorkflowError("candidate receipt is not bound to this brief")
+        return record.artifact
 
     @staticmethod
     def _record_decision(state: dict[str, Any], decision_id: str, payload: dict[str, Any]) -> None:

@@ -12,12 +12,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from broker.contracts import (
+    ArtifactWriteArgs,
     MutationReceipt,
     MutationRequest,
     SandboxWriteArgs,
+    TaskRecordArgs,
     WorkerContract,
 )
-from broker.zero_ops import PreActDenied, ZeroOpsPreAct
+from broker.zero_ops import HealthSnapshot, PreActDenied, ZeroOpsPreAct
 
 
 class BrokerDenied(ValueError):
@@ -147,6 +149,12 @@ class CapabilityBroker:
             or parsed.schema_name != contract.sandbox_schema
         ):
             raise BrokerDenied("requested resource is outside the contract sandbox")
+        if isinstance(parsed, TaskRecordArgs):
+            if parsed.task.worker_id != contract.worker_id:
+                raise BrokerDenied("task worker does not match the worker contract")
+            self._require_artifact_scope(contract, parsed.task.expected_output)
+        if isinstance(parsed, ArtifactWriteArgs):
+            self._require_artifact_scope(contract, parsed.artifact.path)
         request_hash = hashlib.sha256(
             json.dumps(
                 request.model_dump(mode="json"),
@@ -171,3 +179,61 @@ class CapabilityBroker:
                 reason=reason,
             )
         )
+
+    @staticmethod
+    def _require_artifact_scope(contract: WorkerContract, path: str) -> None:
+        prefixes = (prefix.rstrip("/") for prefix in contract.allowed_artifact_prefixes)
+        if not any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes):
+            raise BrokerDenied("requested path is outside the contract artifact scope")
+
+
+def create_tracer_broker(
+    health_probe: Callable[[], HealthSnapshot] | None = None,
+) -> CapabilityBroker:
+    """Build the deterministic tracer broker around an injectable health probe.
+
+    The default snapshot keeps the local tracer reproducible. A deployment must
+    inject live platform probes before treating these checks as observed health.
+    """
+
+    def record_task(arguments: TaskRecordArgs) -> dict[str, Any]:
+        return arguments.model_dump(mode="json")
+
+    def accept_candidate(arguments: ArtifactWriteArgs) -> dict[str, Any]:
+        return arguments.model_dump(mode="json")
+
+    probe = health_probe or _deterministic_tracer_health
+    return CapabilityBroker(
+        contracts=[
+            WorkerContract(
+                contract_id="scrum-master-tracer",
+                contract_version=1,
+                worker_id="scrum-master",
+                allowed_tools={"workflow.record-task", "artifact.accept-candidate"},
+                allowed_artifact_prefixes={"generated/tracer"},
+            )
+        ],
+        tools={
+            "workflow.record-task": ToolSpec(
+                arguments_model=TaskRecordArgs,
+                category="mutation",
+                executor=record_task,
+            ),
+            "artifact.accept-candidate": ToolSpec(
+                arguments_model=ArtifactWriteArgs,
+                category="mutation",
+                executor=accept_candidate,
+            ),
+        },
+        pre_act=ZeroOpsPreAct(probe),
+        artifact_policy=ArtifactPolicy(),
+    )
+
+
+def _deterministic_tracer_health() -> HealthSnapshot:
+    return HealthSnapshot(
+        lakebase_available=True,
+        lakebase_fresh=True,
+        pipeline_fresh=True,
+        unity_catalog_fresh=True,
+    )

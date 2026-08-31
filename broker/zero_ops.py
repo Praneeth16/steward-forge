@@ -9,12 +9,26 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class HealthSnapshot:
     lakebase_available: bool
+    lakebase_fresh: bool
     pipeline_fresh: bool
     unity_catalog_fresh: bool
 
     @property
     def healthy(self) -> bool:
-        return self.lakebase_available and self.pipeline_fresh and self.unity_catalog_fresh
+        return not self.failures
+
+    @property
+    def failures(self) -> tuple[str, ...]:
+        failures: list[str] = []
+        if not self.lakebase_available:
+            failures.append("Lakebase is unavailable")
+        elif not self.lakebase_fresh:
+            failures.append("Lakebase is stale")
+        if not self.pipeline_fresh:
+            failures.append("pipeline is stale")
+        if not self.unity_catalog_fresh:
+            failures.append("Unity Catalog is stale")
+        return tuple(failures)
 
 
 class PreActDenied(RuntimeError):
@@ -32,7 +46,10 @@ class ZeroOpsPreAct:
             return
         try:
             snapshot = self._probe()
+            if not isinstance(snapshot, HealthSnapshot):
+                raise TypeError("health probe returned an invalid snapshot")
+            failures = snapshot.failures
         except Exception as error:
             raise PreActDenied("pre-act health check failed") from error
-        if not snapshot.healthy:
-            raise PreActDenied("pre-act health check failed: system is stale or unavailable")
+        if failures:
+            raise PreActDenied(f"pre-act health check failed: {'; '.join(failures)}")

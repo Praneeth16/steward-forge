@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.models import CandidateArtifact, PlannedTask
+
 
 class WorkerContract(BaseModel):
     """The exact tool and data boundary assigned to one worker."""
@@ -20,6 +22,7 @@ class WorkerContract(BaseModel):
     allowed_tools: frozenset[str] = Field(min_length=1)
     sandbox_catalog: str | None = None
     sandbox_schema: str | None = None
+    allowed_artifact_prefixes: frozenset[str] = Field(default_factory=frozenset)
 
 
 class MutationRequest(BaseModel):
@@ -57,6 +60,32 @@ class EvidenceAppendArgs(BaseModel):
 
     event_id: str = Field(min_length=1)
     payload: dict[str, Any]
+
+
+class TaskRecordArgs(BaseModel):
+    """Typed Scrum Master task accepted into workflow state."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["steward-forge.task-record-args"] = (
+        "steward-forge.task-record-args"
+    )
+    schema_version: Literal[1] = 1
+    brief_id: str = Field(min_length=1)
+    task: PlannedTask
+
+
+class ArtifactWriteArgs(BaseModel):
+    """Typed candidate artifact accepted into workflow state."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["steward-forge.artifact-write-args"] = (
+        "steward-forge.artifact-write-args"
+    )
+    schema_version: Literal[1] = 1
+    brief_id: str = Field(min_length=1)
+    artifact: CandidateArtifact
 
 
 class MutationReceipt(BaseModel):

@@ -1,8 +1,9 @@
 """Versioned contracts used by the first Steward Forge tracer."""
 
+import hashlib
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AcceptanceTest(BaseModel):
@@ -54,6 +55,10 @@ class ReleaseDecision(BaseModel):
 class PlannedTask(BaseModel):
     """A bounded unit of work produced by the Scrum Master."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["steward-forge.planned-task"] = "steward-forge.planned-task"
+    schema_version: Literal[1] = 1
     id: str
     worker_id: str
     owner: str
@@ -65,9 +70,21 @@ class PlannedTask(BaseModel):
 class CandidateArtifact(BaseModel):
     """A deterministic artifact returned by the tracer specialist."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["steward-forge.candidate-artifact"] = (
+        "steward-forge.candidate-artifact"
+    )
+    schema_version: Literal[1] = 1
     path: str
     content: str
     sha: str
+
+    @model_validator(mode="after")
+    def verify_content_hash(self) -> "CandidateArtifact":
+        if hashlib.sha256(self.content.encode()).hexdigest() != self.sha:
+            raise ValueError("candidate SHA does not match its content")
+        return self
 
 
 class ReleaseReceipt(BaseModel):
