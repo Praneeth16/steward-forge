@@ -1,4 +1,4 @@
-"""Unity Catalog DDL for generated GCC delivery tables."""
+"""Unity Catalog DDL for generated Steward Forge tables."""
 
 from __future__ import annotations
 

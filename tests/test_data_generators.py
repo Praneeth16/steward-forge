@@ -80,7 +80,7 @@ def test_canaries_exist_only_at_documented_locations_and_not_on_defect_rows() ->
 
 
 def test_namespace_is_normalized_and_rejects_empty_components() -> None:
-    assert build_namespace("Brief 01", "RUN-02") == "gcc_delivery_brief_01_run_02"
+    assert build_namespace("Brief 01", "RUN-02") == "steward_forge_brief_01_run_02"
     with pytest.raises(ValueError, match="brief_id"):
         build_namespace("---", "run-02")
 
@@ -93,5 +93,5 @@ def test_bundle_writer_emits_canonical_tables_and_ddl(tmp_path: Path) -> None:
         assert written[table_name].read_bytes() == canonical_jsonl(rows)
     ddl = written["uc_ddl"].read_text(encoding="utf-8")
     assert ddl.count("data_classification' = 'SYNTHETIC") == 6
-    assert "`sandbox_catalog`.`sandbox`.`gcc_delivery_brief_01_run_01__backlog`" in ddl
+    assert "`sandbox_catalog`.`sandbox`.`steward_forge_brief_01_run_01__backlog`" in ddl
     assert "CREATE SCHEMA" not in ddl

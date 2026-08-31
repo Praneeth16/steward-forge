@@ -1,4 +1,4 @@
-"""Deterministic generators for the Steward Forge GCC delivery scenario."""
+"""Deterministic generators for the Steward Forge engineering scenario."""
 
 from .backlog import generate_backlog
 from .common import build_namespace, canonical_jsonl, write_bundle

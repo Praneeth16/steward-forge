@@ -1,4 +1,4 @@
-"""Generate one deterministic synthetic GCC delivery dataset bundle."""
+"""Generate one deterministic synthetic Steward Forge dataset bundle."""
 
 from __future__ import annotations
 

@@ -1,11 +1,11 @@
-# Synthetic GCC delivery data schema
+# Synthetic Steward Forge engineering data schema
 
 All names and records in these datasets are fictional. The six teams are Atlas Insights,
 Bluejay Platform, Comet Commerce, Drift Mobile, Ember Operations, and Fjord Developer
 Experience. The generators use a fixed scenario clock and a caller-supplied integer seed;
 they do not read wall-clock time or external services.
 
-Each run lands in tables named `gcc_delivery_<brief_id>_<run_id>__<dataset>` inside the
+Each run lands in tables named `steward_forge_<brief_id>_<run_id>__<dataset>` inside the
 DAB-owned sandbox schema. The generator never creates a schema. It lowercases brief and run
 identifiers and replaces non-alphanumeric runs with underscores. Every table row has
 `synthetic = true`, and the generated Unity Catalog DDL applies

@@ -116,7 +116,7 @@ PRIMARY_KEYS = {
 }
 
 _NAMESPACE_COMPONENT = re.compile(r"[^a-z0-9]+")
-_SAFE_NAMESPACE = re.compile(r"gcc_delivery_[a-z0-9_]+_[a-z0-9_]+")
+_SAFE_NAMESPACE = re.compile(r"steward_forge_[a-z0-9_]+_[a-z0-9_]+")
 
 
 def build_namespace(brief_id: str, run_id: str) -> str:
@@ -128,7 +128,7 @@ def build_namespace(brief_id: str, run_id: str) -> str:
             raise ValueError(f"{label} must contain at least one letter or digit")
         return normalized
 
-    namespace = f"gcc_delivery_{normalize(brief_id, 'brief_id')}_{normalize(run_id, 'run_id')}"
+    namespace = f"steward_forge_{normalize(brief_id, 'brief_id')}_{normalize(run_id, 'run_id')}"
     if len(namespace) > 255:
         raise ValueError("generated namespace exceeds the Unity Catalog 255-character limit")
     return namespace
@@ -137,7 +137,7 @@ def build_namespace(brief_id: str, run_id: str) -> str:
 def validate_namespace(namespace: str) -> None:
     if _SAFE_NAMESPACE.fullmatch(namespace) is None or len(namespace) > 239:
         raise ValueError(
-            "namespace must match gcc_delivery_<brief_id>_<run_id> using lowercase "
+            "namespace must match steward_forge_<brief_id>_<run_id> using lowercase "
             "letters, digits, and underscores and fit a namespaced table identifier"
         )
 

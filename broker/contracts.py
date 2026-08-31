@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orchestrator.models import CandidateArtifact, PlannedTask
 
@@ -54,6 +54,31 @@ class SandboxWriteArgs(BaseModel):
     schema_name: str = Field(alias="schema", min_length=1)
     table: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
     rows: list[dict[str, Any]]
+
+
+class SyntheticTableWriteArgs(BaseModel):
+    """Typed, non-executable rows bound to one generated sandbox table."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["steward-forge.synthetic-table-write-args"] = (
+        "steward-forge.synthetic-table-write-args"
+    )
+    schema_version: Literal[1] = 1
+    catalog: str = Field(min_length=1)
+    schema_name: str = Field(alias="schema", min_length=1)
+    namespace: str = Field(pattern=r"^steward_forge_[a-z0-9_]+_[a-z0-9_]+$")
+    dataset: Literal["backlog", "pipeline_runs", "platform_costs"]
+    rows: list[dict[str, Any]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_row_scope(self) -> "SyntheticTableWriteArgs":
+        if any(
+            row.get("namespace") != self.namespace or row.get("synthetic") is not True
+            for row in self.rows
+        ):
+            raise ValueError("every row must be synthetic and match the requested namespace")
+        return self
 
 
 class EvidenceAppendArgs(BaseModel):

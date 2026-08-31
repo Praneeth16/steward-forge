@@ -1,6 +1,6 @@
 version: 1
 description: >-
-  Executable expectations for deterministic synthetic GCC engineering-delivery data.
+  Executable expectations for deterministic synthetic Steward Forge engineering data.
   Exactly the three findings under expected_failures are deliberately planted.
 
 datasets:
@@ -13,7 +13,7 @@ datasets:
       - id: backlog_namespace_is_scoped
         kind: matches
         column: namespace
-        pattern: "^gcc_delivery_[a-z0-9_]+_[a-z0-9_]+$"
+        pattern: "^steward_forge_[a-z0-9_]+_[a-z0-9_]+$"
       - id: backlog_team_is_fictional
         kind: in_set
         column: team_id
@@ -38,7 +38,7 @@ datasets:
       - id: pipeline_namespace_is_scoped
         kind: matches
         column: namespace
-        pattern: "^gcc_delivery_[a-z0-9_]+_[a-z0-9_]+$"
+        pattern: "^steward_forge_[a-z0-9_]+_[a-z0-9_]+$"
       - id: pipeline_team_is_fictional
         kind: in_set
         column: team_id
@@ -71,7 +71,7 @@ datasets:
       - id: cost_namespace_is_scoped
         kind: matches
         column: namespace
-        pattern: "^gcc_delivery_[a-z0-9_]+_[a-z0-9_]+$"
+        pattern: "^steward_forge_[a-z0-9_]+_[a-z0-9_]+$"
       - id: cost_team_is_fictional
         kind: in_set
         column: team_id

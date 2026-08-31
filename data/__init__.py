@@ -1,1 +1,1 @@
-"""Synthetic delivery data contracts for Steward Forge."""
+"""Synthetic engineering data contracts for Steward Forge."""

@@ -17,6 +17,7 @@ from broker.contracts import (
     MutationReceipt,
     MutationRequest,
     SandboxWriteArgs,
+    SyntheticTableWriteArgs,
     TaskRecordArgs,
     WorkerContract,
 )
@@ -36,6 +37,7 @@ class ToolSpec:
     arguments_model: type[BaseModel]
     category: Literal["mutation", "evidence"]
     executor: Callable[[Any], dict[str, Any]]
+    scan_artifact_content: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +124,7 @@ class CapabilityBroker:
                         self._event(request, "replayed", "first receipt returned")
                         return receipt
 
-                    if tool.category != "evidence":
+                    if tool.category != "evidence" and tool.scan_artifact_content:
                         self._artifact_policy.validate(request.arguments)
                     self._pre_act.authorize(tool.category)
                     result = tool.executor(parsed)
@@ -162,7 +164,7 @@ class CapabilityBroker:
         if tool is None:
             raise BrokerDenied("tool is not registered")
         parsed = tool.arguments_model.model_validate(request.arguments)
-        if isinstance(parsed, SandboxWriteArgs) and (
+        if isinstance(parsed, SandboxWriteArgs | SyntheticTableWriteArgs) and (
             parsed.catalog != contract.sandbox_catalog
             or parsed.schema_name != contract.sandbox_schema
         ):
@@ -244,6 +246,42 @@ def create_tracer_broker(
             ),
         },
         pre_act=ZeroOpsPreAct(probe),
+        artifact_policy=ArtifactPolicy(),
+    )
+
+
+def create_data_engineer_broker(
+    *,
+    sandbox_catalog: str,
+    sandbox_schema: str,
+    table_writer: Callable[[SyntheticTableWriteArgs], dict[str, Any]],
+    health_probe: Callable[[], HealthSnapshot] | None = None,
+) -> CapabilityBroker:
+    """Build the versioned, sandbox-only broker for the Data Engineer worker."""
+
+    return CapabilityBroker(
+        contracts=[
+            WorkerContract(
+                contract_id="data-engineer-synthetic-pipeline",
+                contract_version=1,
+                worker_id="data-engineer",
+                allowed_tools={"sandbox.write-synthetic-table"},
+                sandbox_catalog=sandbox_catalog,
+                sandbox_schema=sandbox_schema,
+                allowed_artifact_prefixes={"generated/data-engineer"},
+            )
+        ],
+        tools={
+            "sandbox.write-synthetic-table": ToolSpec(
+                arguments_model=SyntheticTableWriteArgs,
+                category="mutation",
+                executor=table_writer,
+                # Row text is governed data, not an executable instruction channel.
+                # Its exact canary placement is checked by the deterministic data gate.
+                scan_artifact_content=False,
+            )
+        },
+        pre_act=ZeroOpsPreAct(health_probe or _deterministic_tracer_health),
         artifact_policy=ArtifactPolicy(),
     )
 

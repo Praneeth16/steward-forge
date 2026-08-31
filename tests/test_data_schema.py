@@ -28,7 +28,7 @@ def test_schema_document_matches_executable_uc_ddl() -> None:
         expected = [(column.name, column.sql_type, column.nullable) for column in columns]
         assert _documented_columns(markdown, table_name) == expected
         ddl = render_table_ddl(
-            "catalog", "sandbox", "gcc_delivery_brief_01_run_01", table_name
+            "catalog", "sandbox", "steward_forge_brief_01_run_01", table_name
         )
         assert _ddl_columns(ddl) == expected
 
